@@ -312,7 +312,7 @@ to the linker depending on the stage selection options).
 
 =cut
 
-##=item B<-fnext-runtime> B<-fobjc-nonfragile-abi> B<-fgnu-runtime>
+##=item B<-fnext-runtime> B<-fobjc-nonfragile-abi> B<-fgnu-runtime> B<-fcocotron-runtime>
 ##These options specify which Objective-C runtime the code generator should
 ##target.  FIXME: we don't want people poking these generally.
 

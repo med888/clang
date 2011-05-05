@@ -61,7 +61,6 @@ public:
   unsigned RTTI              : 1;  // Support RTTI information.
 
   unsigned MSBitfields       : 1; // MS-compatible structure layout
-  unsigned NeXTRuntime       : 1; // Use NeXT runtime.
   unsigned Freestanding      : 1; // Freestanding implementation
   unsigned NoBuiltin         : 1; // Do not use builtin functions (-fno-builtin)
 
@@ -141,6 +140,7 @@ private:
   unsigned SymbolVisibility  : 3; // Symbol's visibility.
   unsigned StackProtector    : 2; // Whether stack protectors are on.
   unsigned SignedOverflowBehavior : 2; // How to handle signed integer overflow.
+  unsigned ObjCRuntime : 2;       // Objective-C runtime modes.
 
 public:
   unsigned InstantiationDepth;    // Maximum template instantiation depth.
@@ -156,6 +156,7 @@ public:
 
   enum GCMode { NonGC, GCOnly, HybridGC };
   enum StackProtectorMode { SSPOff, SSPOn, SSPReq };
+  enum ObjCRuntimeMode { NeXT, GNU, Cocotron };
 
   enum SignedOverflowBehaviorTy {
     SOB_Undefined,  // Default C standard behavior.
@@ -173,13 +174,13 @@ public:
     GC = ObjC1 = ObjC2 = ObjCNonFragileABI = ObjCNonFragileABI2 = 0;
     AppleKext = 0;
     ObjCDefaultSynthProperties = 0;
+    setObjCRuntimeMode(NeXT);
     NoConstantCFStrings = 0; InlineVisibilityHidden = 0;
     C99 = C1X = Microsoft = Borland = CPlusPlus = CPlusPlus0x = 0;
     CXXOperatorNames = PascalStrings = WritableStrings = ConstStrings = 0;
     Exceptions = ObjCExceptions = CXXExceptions = SjLjExceptions = 0;
     TraditionalCPP = Freestanding = NoBuiltin = 0;
     MSBitfields = 0;
-    NeXTRuntime = 1;
     RTTI = 1;
     LaxVectorConversions = 1;
     HeinousExtensions = 0;
@@ -242,6 +243,13 @@ public:
   }
   void setStackProtectorMode(StackProtectorMode m) {
     StackProtector = static_cast<unsigned>(m);
+  }
+    
+  ObjCRuntimeMode getObjCRuntimeMode() const {
+    return static_cast<ObjCRuntimeMode>(ObjCRuntime);
+  }
+  void setObjCRuntimeMode(ObjCRuntimeMode m) {
+    ObjCRuntime = static_cast<unsigned>(m);
   }
 
   Visibility getVisibilityMode() const {

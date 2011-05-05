@@ -1668,13 +1668,23 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
     A->render(Args, CmdArgs);
 
   // -fnext-runtime defaults to on Darwin and when rewriting Objective-C, and is
-  // -the -cc1 default.
-  bool NeXTRuntimeIsDefault =
+  // -the -cc1 default.    
+  if (Arg *A = Args.getLastArgNoClaim(options::OPT_fgnu_runtime,
+                                      options::OPT_fnext_runtime,
+                                      options::OPT_fcocotron_runtime)) {
+    A->claim();        
+    if (A->getOption().matches(options::OPT_fgnu_runtime))            
+      CmdArgs.push_back("-fgnu-runtime");
+    else if (A->getOption().matches(options::OPT_fcocotron_runtime))            
+      CmdArgs.push_back("-fcocotron-runtime");
+  }
+  else {
+    bool NeXTRuntimeIsDefault =
     IsRewriter || getToolChain().getTriple().getOS() == llvm::Triple::Darwin;
-  if (!Args.hasFlag(options::OPT_fnext_runtime, options::OPT_fgnu_runtime,
-                    NeXTRuntimeIsDefault))
-    CmdArgs.push_back("-fgnu-runtime");
 
+    if (!NeXTRuntimeIsDefault)
+      CmdArgs.push_back("-fgnu-runtime");
+  }
   // -fobjc-nonfragile-abi=0 is default.
   if (types::isObjC(InputType)) {
     // Compute the Objective-C ABI "version" to use. Version numbers are

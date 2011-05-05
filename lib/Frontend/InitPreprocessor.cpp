@@ -292,8 +292,11 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
     if (LangOpts.getGCMode() != LangOptions::NonGC)
       Builder.defineMacro("__OBJC_GC__");
 
-    if (LangOpts.NeXTRuntime)
+    if (LangOpts.getObjCRuntimeMode() == LangOptions::NeXT)
       Builder.defineMacro("__NEXT_RUNTIME__");
+    
+    if (LangOpts.getObjCRuntimeMode() == LangOptions::Cocotron)
+      Builder.defineMacro("__COCOTRON_RUNTIME__");
   }
 
   // darwin_constant_cfstrings controls this. This is also dependent

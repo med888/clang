@@ -161,7 +161,7 @@ static const EHPersonality &getCPersonality(const LangOptions &L) {
 }
 
 static const EHPersonality &getObjCPersonality(const LangOptions &L) {
-  if (L.NeXTRuntime) {
+  if (L.getObjCRuntimeMode() == LangOptions::NeXT) {
     if (L.ObjCNonFragileABI) return EHPersonality::NeXT_ObjC;
     else return getCPersonality(L);
   } else {
@@ -182,7 +182,7 @@ static const EHPersonality &getObjCXXPersonality(const LangOptions &L) {
   // The ObjC personality defers to the C++ personality for non-ObjC
   // handlers.  Unlike the C++ case, we use the same personality
   // function on targets using (backend-driven) SJLJ EH.
-  if (L.NeXTRuntime) {
+  if (L.getObjCRuntimeMode() == LangOptions::NeXT) {
     if (L.ObjCNonFragileABI)
       return EHPersonality::NeXT_ObjC;
 

@@ -54,6 +54,25 @@ Arg *ArgList::getLastArgNoClaim(OptSpecifier Id) const {
   return 0;
 }
 
+Arg *ArgList::getLastArgNoClaim(OptSpecifier Id0, OptSpecifier Id1) const {
+    // FIXME: Make search efficient?
+    for (const_reverse_iterator it = rbegin(), ie = rend(); it != ie; ++it)
+        if ((*it)->getOption().matches(Id0) ||
+            (*it)->getOption().matches(Id1))
+            return *it;
+    return 0;
+}
+
+Arg *ArgList::getLastArgNoClaim(OptSpecifier Id0, OptSpecifier Id1, OptSpecifier Id2) const {
+    // FIXME: Make search efficient?
+    for (const_reverse_iterator it = rbegin(), ie = rend(); it != ie; ++it)
+        if ((*it)->getOption().matches(Id0) ||
+            (*it)->getOption().matches(Id1) ||
+            (*it)->getOption().matches(Id2))
+            return *it;
+    return 0;
+}
+
 Arg *ArgList::getLastArg(OptSpecifier Id) const {
   Arg *Res = 0;
   for (const_iterator it = begin(), ie = end(); it != ie; ++it) {

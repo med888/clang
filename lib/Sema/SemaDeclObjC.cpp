@@ -994,7 +994,7 @@ void Sema::CheckProtocolMethodDefs(SourceLocation ImpLoc,
   
   ObjCInterfaceDecl *Super = IDecl->getSuperClass();
   ObjCInterfaceDecl *NSIDecl = 0;
-  if (getLangOptions().NeXTRuntime) {
+  if (getLangOptions().getObjCRuntimeMode() == LangOptions::NeXT) {
     // check to see if class implements forwardInvocation method and objects
     // of this class are derived from 'NSProxy' so that to forward requests
     // from one object to another.

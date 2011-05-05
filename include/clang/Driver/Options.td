@@ -263,6 +263,7 @@ def fcaret_diagnostics : Flag<"-fcaret-diagnostics">, Group<f_Group>;
 def fcatch_undefined_behavior : Flag<"-fcatch-undefined-behavior">,
     Group<f_Group>, HelpText<"Generate runtime checks for undefined behavior.">;
 def fclasspath_EQ : Joined<"-fclasspath=">, Group<f_Group>;
+def fcocotron_runtime : Flag<"-fcocotron-runtime">, Group<f_Group>;
 def fcolor_diagnostics : Flag<"-fcolor-diagnostics">, Group<f_Group>;
 def fcommon : Flag<"-fcommon">, Group<f_Group>;
 def fcompile_resource_EQ : Joined<"-fcompile-resource=">, Group<f_Group>;
