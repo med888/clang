@@ -104,7 +104,7 @@ PCHValidator::ReadLanguageOptions(const LangOptions &LangOpts) {
   PARSE_LANGOPT_IMPORTANT(CXXExceptions, diag::warn_pch_cxx_exceptions);
   PARSE_LANGOPT_IMPORTANT(SjLjExceptions, diag::warn_pch_sjlj_exceptions);
   PARSE_LANGOPT_IMPORTANT(MSBitfields, diag::warn_pch_ms_bitfields);
-  PARSE_LANGOPT_IMPORTANT(getObjCRuntimeMode(), diag::warn_pch_ms_bitfields);
+  PARSE_LANGOPT_IMPORTANT(getObjCRuntimeMode(), diag::warn_pch_objc_runtime);
   PARSE_LANGOPT_IMPORTANT(Freestanding, diag::warn_pch_freestanding);
   PARSE_LANGOPT_IMPORTANT(NoBuiltin, diag::warn_pch_builtins);
   PARSE_LANGOPT_IMPORTANT(ThreadsafeStatics,
