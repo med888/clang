@@ -968,9 +968,8 @@ Decl *Parser::ParseDeclarationAfterDeclaratorAndAttributes(Declarator &D,
       Actions.SetDeclDeleted(ThisDecl, DelLoc);
     } else if (Tok.is(tok::kw_default)) {
       SourceLocation DefLoc = ConsumeToken();
-      Diag(DefLoc, diag::err_default_special_members);
 
-      ThisDecl->setInvalidDecl();
+      Diag(DefLoc, diag::err_default_special_members);
     } else {
       if (getLang().CPlusPlus && D.getCXXScopeSpec().isSet()) {
         EnterScope(0);

@@ -387,12 +387,34 @@ Decl *Parser::ParseUsingDeclaration(unsigned Context,
   bool IsAliasDecl = Tok.is(tok::equal);
   TypeResult TypeAlias;
   if (IsAliasDecl) {
-    // TODO: Do we want to support attributes somewhere in an alias declaration?
-    // Can't follow GCC since it doesn't support them yet!
+    // TODO: Attribute support. C++0x attributes may appear before the equals.
+    // Where can GNU attributes appear?
     ConsumeToken();
 
     if (!getLang().CPlusPlus0x)
       Diag(Tok.getLocation(), diag::ext_alias_declaration);
+
+    // Type alias templates cannot be specialized.
+    int SpecKind = -1;
+    if (TemplateInfo.Kind == ParsedTemplateInfo::Template &&
+        Name.getKind() == UnqualifiedId::IK_TemplateId)
+      SpecKind = 0;
+    if (TemplateInfo.Kind == ParsedTemplateInfo::ExplicitSpecialization)
+      SpecKind = 1;
+    if (TemplateInfo.Kind == ParsedTemplateInfo::ExplicitInstantiation)
+      SpecKind = 2;
+    if (SpecKind != -1) {
+      SourceRange Range;
+      if (SpecKind == 0)
+        Range = SourceRange(Name.TemplateId->LAngleLoc,
+                            Name.TemplateId->RAngleLoc);
+      else
+        Range = TemplateInfo.getSourceRange();
+      Diag(Range.getBegin(), diag::err_alias_declaration_specialization)
+        << SpecKind << Range;
+      SkipUntil(tok::semi);
+      return 0;
+    }
 
     // Name must be an identifier.
     if (Name.getKind() != UnqualifiedId::IK_Identifier) {
@@ -408,7 +430,9 @@ Decl *Parser::ParseUsingDeclaration(unsigned Context,
       Diag(SS.getBeginLoc(), diag::err_alias_declaration_not_identifier)
         << FixItHint::CreateRemoval(SS.getRange());
 
-    TypeAlias = ParseTypeName(0, Declarator::AliasDeclContext);
+    TypeAlias = ParseTypeName(0, TemplateInfo.Kind ?
+                              Declarator::AliasTemplateContext :
+                              Declarator::AliasDeclContext);
   } else
     // Parse (optional) attributes (most likely GNU strong-using extension).
     MaybeParseGNUAttributes(attrs);
@@ -421,9 +445,9 @@ Decl *Parser::ParseUsingDeclaration(unsigned Context,
                    tok::semi);
 
   // Diagnose an attempt to declare a templated using-declaration.
-  // TODO: in C++0x, alias-declarations can be templates:
+  // In C++0x, alias-declarations can be templates:
   //   template <...> using id = type;
-  if (TemplateInfo.Kind) {
+  if (TemplateInfo.Kind && !IsAliasDecl) {
     SourceRange R = TemplateInfo.getSourceRange();
     Diag(UsingLoc, diag::err_templated_using_declaration)
       << R << FixItHint::CreateRemoval(R);
@@ -434,9 +458,14 @@ Decl *Parser::ParseUsingDeclaration(unsigned Context,
     return 0;
   }
 
-  if (IsAliasDecl)
-    return Actions.ActOnAliasDeclaration(getCurScope(), AS, UsingLoc, Name,
-                                         TypeAlias);
+  if (IsAliasDecl) {
+    TemplateParameterLists *TemplateParams = TemplateInfo.TemplateParams;
+    MultiTemplateParamsArg TemplateParamsArg(Actions,
+      TemplateParams ? TemplateParams->data() : 0,
+      TemplateParams ? TemplateParams->size() : 0);
+    return Actions.ActOnAliasDeclaration(getCurScope(), AS, TemplateParamsArg,
+                                         UsingLoc, Name, TypeAlias);
+  }
 
   return Actions.ActOnUsingDeclaration(getCurScope(), AS, true, UsingLoc, SS,
                                        Name, attrs.getList(),
@@ -1515,8 +1544,6 @@ void Parser::ParseCXXClassMemberDeclaration(AccessSpecifier AS,
   MaybeParseMicrosoftAttributes(attrs);
 
   if (Tok.is(tok::kw_using)) {
-    // FIXME: Check for template aliases
-
     ProhibitAttributes(attrs);
 
     // Eat 'using'.
@@ -1527,7 +1554,7 @@ void Parser::ParseCXXClassMemberDeclaration(AccessSpecifier AS,
       SkipUntil(tok::semi, true, true);
     } else {
       SourceLocation DeclEnd;
-      // Otherwise, it must be using-declaration.
+      // Otherwise, it must be a using-declaration or an alias-declaration.
       ParseUsingDeclaration(Declarator::MemberContext, TemplateInfo,
                             UsingLoc, DeclEnd, AS);
     }
@@ -1621,7 +1648,6 @@ void Parser::ParseCXXClassMemberDeclaration(AccessSpecifier AS,
   ExprResult BitfieldSize;
   ExprResult Init;
   bool Deleted = false;
-  bool Defaulted = false;
   SourceLocation DefLoc;
 
   while (1) {
@@ -1654,11 +1680,10 @@ void Parser::ParseCXXClassMemberDeclaration(AccessSpecifier AS,
           Diag(Tok, diag::warn_deleted_function_accepted_as_extension);
         ConsumeToken();
         Deleted = true;
-      } else if (Tok.is(tok::kw_delete)) {
+      } else if (Tok.is(tok::kw_default)) {
         if (!getLang().CPlusPlus0x)
           Diag(Tok, diag::warn_defaulted_function_accepted_as_extension);
         DefLoc = ConsumeToken();
-        Defaulted = true;
       } else {
         Init = ParseInitializer();
         if (Init.isInvalid())
@@ -1686,14 +1711,13 @@ void Parser::ParseCXXClassMemberDeclaration(AccessSpecifier AS,
 
     Decl *ThisDecl = 0;
     if (DS.isFriendSpecified()) {
+      if (DefLoc.isValid())
+        Diag(DefLoc, diag::err_default_special_members);
+
       // TODO: handle initializers, bitfields, 'delete'
       ThisDecl = Actions.ActOnFriendFunctionDecl(getCurScope(), DeclaratorInfo,
                                                  /*IsDefinition*/ false,
                                                  move(TemplateParams));
-      if (Defaulted) {
-        Diag(DefLoc, diag::err_friends_define_only_namespace_scope);
-        ThisDecl->setInvalidDecl();
-      }
     } else {
       ThisDecl = Actions.ActOnCXXMemberDeclarator(getCurScope(), AS,
                                                   DeclaratorInfo,
@@ -1701,7 +1725,7 @@ void Parser::ParseCXXClassMemberDeclaration(AccessSpecifier AS,
                                                   BitfieldSize.release(),
                                                   VS, Init.release(),
                                                   /*IsDefinition*/Deleted,
-                                                  Deleted, Defaulted);
+                                                  Deleted, DefLoc);
     }
     if (ThisDecl)
       DeclsInGroup.push_back(ThisDecl);
@@ -1728,7 +1752,7 @@ void Parser::ParseCXXClassMemberDeclaration(AccessSpecifier AS,
     BitfieldSize = 0;
     Init = 0;
     Deleted = false;
-    Defaulted = false;
+    DefLoc = SourceLocation();
 
     // Attributes are only allowed on the second declarator.
     MaybeParseGNUAttributes(DeclaratorInfo);

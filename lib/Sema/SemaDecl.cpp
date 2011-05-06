@@ -891,19 +891,19 @@ static bool isOutOfScopePreviousDeclaration(NamedDecl *,
 
 /// Filters out lookup results that don't fall within the given scope
 /// as determined by isDeclInScope.
-static void FilterLookupForScope(Sema &SemaRef, LookupResult &R,
-                                 DeclContext *Ctx, Scope *S,
-                                 bool ConsiderLinkage,
-                                 bool ExplicitInstantiationOrSpecialization) {
+void Sema::FilterLookupForScope(LookupResult &R,
+                                DeclContext *Ctx, Scope *S,
+                                bool ConsiderLinkage,
+                                bool ExplicitInstantiationOrSpecialization) {
   LookupResult::Filter F = R.makeFilter();
   while (F.hasNext()) {
     NamedDecl *D = F.next();
 
-    if (SemaRef.isDeclInScope(D, Ctx, S, ExplicitInstantiationOrSpecialization))
+    if (isDeclInScope(D, Ctx, S, ExplicitInstantiationOrSpecialization))
       continue;
 
     if (ConsiderLinkage &&
-        isOutOfScopePreviousDeclaration(D, Ctx, SemaRef.Context))
+        isOutOfScopePreviousDeclaration(D, Ctx, Context))
       continue;
     
     F.erase();
@@ -2919,7 +2919,8 @@ bool Sema::DiagnoseClassNameShadow(DeclContext *DC,
   
 Decl *Sema::HandleDeclarator(Scope *S, Declarator &D,
                              MultiTemplateParamsArg TemplateParamLists,
-                             bool IsFunctionDefinition) {
+                             bool IsFunctionDefinition,
+                             SourceLocation DefLoc) {
   // TODO: consider using NameInfo for diagnostic.
   DeclarationNameInfo NameInfo = GetNameForDeclarator(D);
   DeclarationName Name = NameInfo.getName();
@@ -2962,7 +2963,6 @@ Decl *Sema::HandleDeclarator(Scope *S, Declarator &D,
         << D.getCXXScopeSpec().getRange();
       return 0;
     }
-
     bool IsDependentContext = DC->isDependentContext();
 
     if (!IsDependentContext && 
@@ -3121,6 +3121,9 @@ Decl *Sema::HandleDeclarator(Scope *S, Declarator &D,
 
   bool Redeclaration = false;
   if (D.getDeclSpec().getStorageClassSpec() == DeclSpec::SCS_typedef) {
+    if (DefLoc.isValid())
+      Diag(DefLoc, diag::err_default_special_members);
+
     if (TemplateParamLists.size()) {
       Diag(D.getIdentifierLoc(), diag::err_template_typedef);
       return 0;
@@ -3130,8 +3133,9 @@ Decl *Sema::HandleDeclarator(Scope *S, Declarator &D,
   } else if (R->isFunctionType()) {
     New = ActOnFunctionDeclarator(S, D, DC, R, TInfo, Previous,
                                   move(TemplateParamLists),
-                                  IsFunctionDefinition, Redeclaration);
+                                  IsFunctionDefinition, Redeclaration, DefLoc);
   } else {
+    assert(!DefLoc.isValid() && "We should have caught this in a caller");
     New = ActOnVariableDeclarator(S, D, DC, R, TInfo, Previous,
                                   move(TemplateParamLists),
                                   Redeclaration);
@@ -3304,15 +3308,13 @@ Sema::ActOnTypedefDeclarator(Scope* S, Declarator& D, DeclContext* DC,
   // Handle attributes prior to checking for duplicates in MergeVarDecl
   ProcessDeclAttributes(S, NewTD, D);
 
+  CheckTypedefForVariablyModifiedType(S, NewTD);
+
   return ActOnTypedefNameDecl(S, DC, NewTD, Previous, Redeclaration);
 }
 
-/// ActOnTypedefNameDecl - Perform semantic checking for a declaration which
-/// declares a typedef-name, either using the 'typedef' type specifier or via
-/// a C++0x [dcl.typedef]p2 alias-declaration: 'using T = A;'.
-NamedDecl*
-Sema::ActOnTypedefNameDecl(Scope *S, DeclContext *DC, TypedefNameDecl *NewTD,
-                           LookupResult &Previous, bool &Redeclaration) {
+void
+Sema::CheckTypedefForVariablyModifiedType(Scope *S, TypedefNameDecl *NewTD) {
   // C99 6.7.7p2: If a typedef name specifies a variably modified type
   // then it shall have block scope.
   // Note that variably modified types must be fixed before merging the decl so
@@ -3343,10 +3345,18 @@ Sema::ActOnTypedefNameDecl(Scope *S, DeclContext *DC, TypedefNameDecl *NewTD,
       }
     }
   }
+}
 
+
+/// ActOnTypedefNameDecl - Perform semantic checking for a declaration which
+/// declares a typedef-name, either using the 'typedef' type specifier or via
+/// a C++0x [dcl.typedef]p2 alias-declaration: 'using T = A;'.
+NamedDecl*
+Sema::ActOnTypedefNameDecl(Scope *S, DeclContext *DC, TypedefNameDecl *NewTD,
+                           LookupResult &Previous, bool &Redeclaration) {
   // Merge the decl with the existing one if appropriate. If the decl is
   // in an outer scope, it isn't the same thing.
-  FilterLookupForScope(*this, Previous, DC, S, /*ConsiderLinkage*/ false,
+  FilterLookupForScope(Previous, DC, S, /*ConsiderLinkage*/ false,
                        /*ExplicitInstantiationOrSpecialization=*/false);
   if (!Previous.empty()) {
     Redeclaration = true;
@@ -3625,7 +3635,7 @@ Sema::ActOnVariableDeclarator(Scope *S, Declarator &D, DeclContext *DC,
   // Don't consider existing declarations that are in a different
   // scope and are out-of-semantic-context declarations (if the new
   // declaration has linkage).
-  FilterLookupForScope(*this, Previous, DC, S, NewVD->hasLinkage(),
+  FilterLookupForScope(Previous, DC, S, NewVD->hasLinkage(),
                        isExplicitSpecialization);
   
   if (!getLangOptions().CPlusPlus)
@@ -3997,7 +4007,8 @@ Sema::ActOnFunctionDeclarator(Scope* S, Declarator& D, DeclContext* DC,
                               QualType R, TypeSourceInfo *TInfo,
                               LookupResult &Previous,
                               MultiTemplateParamsArg TemplateParamLists,
-                              bool IsFunctionDefinition, bool &Redeclaration) {
+                              bool IsFunctionDefinition, bool &Redeclaration,
+                              SourceLocation DefLoc) {
   assert(R.getTypePtr()->isFunctionType());
 
   // TODO: consider using NameInfo for diagnostic.
@@ -4054,6 +4065,8 @@ Sema::ActOnFunctionDeclarator(Scope* S, Declarator& D, DeclContext* DC,
   bool isFunctionTemplateSpecialization = false;
 
   if (!getLangOptions().CPlusPlus) {
+    assert(!DefLoc.isValid() && "Defaulted functions are a C++ feature");
+
     // Determine whether the function was written with a
     // prototype. This true when:
     //   - there is a prototype in the declarator, or
@@ -4072,7 +4085,7 @@ Sema::ActOnFunctionDeclarator(Scope* S, Declarator& D, DeclContext* DC,
     // Set the lexical context.
     NewFD->setLexicalDeclContext(CurContext);
     // Filter out previous declarations that don't match the scope.
-    FilterLookupForScope(*this, Previous, DC, S, NewFD->hasLinkage(),
+    FilterLookupForScope(Previous, DC, S, NewFD->hasLinkage(),
                          /*ExplicitInstantiationOrSpecialization=*/false);
   } else {
     isFriend = D.getDeclSpec().isFriendSpecified();
@@ -4098,13 +4111,25 @@ Sema::ActOnFunctionDeclarator(Scope* S, Declarator& D, DeclContext* DC,
       R = CheckConstructorDeclarator(D, R, SC);
 
       // Create the new declaration
-      NewFD = CXXConstructorDecl::Create(Context,
+      CXXConstructorDecl *NewCD = CXXConstructorDecl::Create(
+                                         Context,
                                          cast<CXXRecordDecl>(DC),
                                          D.getSourceRange().getBegin(),
                                          NameInfo, R, TInfo,
                                          isExplicit, isInline,
-                                         /*isImplicitlyDeclared=*/false,
-                                         /*isExplicitlyDefaulted=*/false);
+                                         /*isImplicitlyDeclared=*/false);
+
+      NewFD = NewCD;
+
+      if (DefLoc.isValid()) {
+        if (NewCD->isDefaultConstructor() ||
+            NewCD->isCopyOrMoveConstructor()) {
+          NewFD->setDefaulted();
+          NewFD->setExplicitlyDefaulted();
+        } else {
+          Diag(DefLoc, diag::err_default_special_members);
+        }
+      }
     } else if (Name.getNameKind() == DeclarationName::CXXDestructorName) {
       // This is a C++ destructor declaration.
       if (DC->isRecord()) {
@@ -4117,6 +4142,11 @@ Sema::ActOnFunctionDeclarator(Scope* S, Declarator& D, DeclContext* DC,
                                           isInline,
                                           /*isImplicitlyDeclared=*/false);
         isVirtualOkay = true;
+
+        if (DefLoc.isValid()) {
+          NewFD->setDefaulted();
+          NewFD->setExplicitlyDefaulted();
+        }
       } else {
         Diag(D.getIdentifierLoc(), diag::err_destructor_not_member);
 
@@ -4134,6 +4164,9 @@ Sema::ActOnFunctionDeclarator(Scope* S, Declarator& D, DeclContext* DC,
              diag::err_conv_function_not_member);
         return 0;
       }
+
+      if (DefLoc.isValid())
+        Diag(DefLoc, diag::err_default_special_members);
 
       CheckConversionDeclarator(D, R, SC);
       NewFD = CXXConversionDecl::Create(Context, cast<CXXRecordDecl>(DC),
@@ -4173,14 +4206,29 @@ Sema::ActOnFunctionDeclarator(Scope* S, Declarator& D, DeclContext* DC,
         isStatic = true;
 
       // This is a C++ method declaration.
-      NewFD = CXXMethodDecl::Create(Context, cast<CXXRecordDecl>(DC),
-                                    D.getSourceRange().getBegin(),
-                                    NameInfo, R, TInfo,
-                                    isStatic, SCAsWritten, isInline,
-                                    SourceLocation());
+      CXXMethodDecl *NewMD = CXXMethodDecl::Create(
+                                               Context, cast<CXXRecordDecl>(DC),
+                                               D.getSourceRange().getBegin(),
+                                               NameInfo, R, TInfo,
+                                               isStatic, SCAsWritten, isInline,
+                                               SourceLocation());
+      NewFD = NewMD;
 
       isVirtualOkay = !isStatic;
+
+      if (DefLoc.isValid()) {
+        if (NewMD->isCopyAssignmentOperator() /* ||
+            NewMD->isMoveAssignmentOperator() */) {
+          NewFD->setDefaulted();
+          NewFD->setExplicitlyDefaulted();
+        } else {
+          Diag(DefLoc, diag::err_default_special_members);
+        }
+      }
     } else {
+      if (DefLoc.isValid())
+        Diag(DefLoc, diag::err_default_special_members);
+
       // Determine whether the function was written with a
       // prototype. This true when:
       //   - we're in C++ (where every function has a prototype),
@@ -4350,7 +4398,7 @@ Sema::ActOnFunctionDeclarator(Scope* S, Declarator& D, DeclContext* DC,
     }
 
     // Filter out previous declarations that don't match the scope.
-    FilterLookupForScope(*this, Previous, DC, S, NewFD->hasLinkage(),
+    FilterLookupForScope(Previous, DC, S, NewFD->hasLinkage(),
                          isExplicitSpecialization || 
                          isFunctionTemplateSpecialization);
 
@@ -4417,6 +4465,9 @@ Sema::ActOnFunctionDeclarator(Scope* S, Declarator& D, DeclContext* DC,
         bool IsTypeAlias = false;
         if (const TypedefType *TT = Param->getType()->getAs<TypedefType>())
           IsTypeAlias = isa<TypeAliasDecl>(TT->getDecl());
+        else if (const TemplateSpecializationType *TST =
+                   Param->getType()->getAs<TemplateSpecializationType>())
+          IsTypeAlias = TST->isTypeAlias();
         Diag(Param->getLocation(), diag::err_param_typedef_of_void)
           << IsTypeAlias;
       }

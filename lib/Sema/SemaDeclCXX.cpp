@@ -963,10 +963,7 @@ Sema::ActOnCXXMemberDeclarator(Scope *S, AccessSpecifier AS, Declarator &D,
                                MultiTemplateParamsArg TemplateParameterLists,
                                ExprTy *BW, const VirtSpecifiers &VS,
                                ExprTy *InitExpr, bool IsDefinition,
-                               bool Deleted, bool Defaulted) {
-  // FIXME: Do something with this
-  (void) Defaulted;
-
+                               bool Deleted, SourceLocation DefLoc) {
   const DeclSpec &DS = D.getDeclSpec();
   DeclarationNameInfo NameInfo = GetNameForDeclarator(D);
   DeclarationName Name = NameInfo.getName();
@@ -1031,6 +1028,8 @@ Sema::ActOnCXXMemberDeclarator(Scope *S, AccessSpecifier AS, Declarator &D,
   if (isInstField) {
     CXXScopeSpec &SS = D.getCXXScopeSpec();
     
+    if (DefLoc.isValid())
+      Diag(DefLoc, diag::err_default_special_members);
     
     if (SS.isSet() && !SS.isInvalid()) {
       // The user provided a superfluous scope specifier inside a class
@@ -1056,7 +1055,8 @@ Sema::ActOnCXXMemberDeclarator(Scope *S, AccessSpecifier AS, Declarator &D,
                          AS);
     assert(Member && "HandleField never returns null");
   } else {
-    Member = HandleDeclarator(S, D, move(TemplateParameterLists), IsDefinition);
+    Member = HandleDeclarator(S, D, move(TemplateParameterLists), IsDefinition,
+                              DefLoc);
     if (!Member) {
       return 0;
     }
@@ -3467,6 +3467,11 @@ QualType Sema::CheckDestructorDeclarator(Declarator &D, QualType R,
   if (const TypedefType *TT = DeclaratorType->getAs<TypedefType>())
     Diag(D.getIdentifierLoc(), diag::err_destructor_typedef_name)
       << DeclaratorType << isa<TypeAliasDecl>(TT->getDecl());
+  else if (const TemplateSpecializationType *TST =
+             DeclaratorType->getAs<TemplateSpecializationType>())
+    if (TST->isTypeAlias())
+      Diag(D.getIdentifierLoc(), diag::err_destructor_typedef_name)
+        << DeclaratorType << 1;
 
   // C++ [class.dtor]p2:
   //   A destructor is used to destroy objects of its class type. A
@@ -4701,9 +4706,13 @@ bool Sema::CheckUsingDeclQualifier(SourceLocation UsingLoc,
 
 Decl *Sema::ActOnAliasDeclaration(Scope *S,
                                   AccessSpecifier AS,
+                                  MultiTemplateParamsArg TemplateParamLists,
                                   SourceLocation UsingLoc,
                                   UnqualifiedId &Name,
                                   TypeResult Type) {
+  // Skip up to the relevant declaration scope.
+  while (S->getFlags() & Scope::TemplateParamScope)
+    S = S->getParent();
   assert((S->getFlags() & Scope::DeclScope) &&
          "got alias-declaration outside of declaration scope");
 
@@ -4719,8 +4728,11 @@ Decl *Sema::ActOnAliasDeclaration(Scope *S,
     return 0;
 
   if (DiagnoseUnexpandedParameterPack(Name.StartLocation, TInfo,
-                                      UPPC_DeclarationType))
+                                      UPPC_DeclarationType)) {
     Invalid = true;
+    TInfo = Context.getTrivialTypeSourceInfo(Context.IntTy, 
+                                             TInfo->getTypeLoc().getBeginLoc());
+  }
 
   LookupResult Previous(*this, NameInfo, LookupOrdinaryName, ForRedeclaration);
   LookupName(Previous, S);
@@ -4745,13 +4757,93 @@ Decl *Sema::ActOnAliasDeclaration(Scope *S,
   if (Invalid)
     NewTD->setInvalidDecl();
 
+  CheckTypedefForVariablyModifiedType(S, NewTD);
+  Invalid |= NewTD->isInvalidDecl();
+
   bool Redeclaration = false;
-  ActOnTypedefNameDecl(S, CurContext, NewTD, Previous, Redeclaration);
+
+  NamedDecl *NewND;
+  if (TemplateParamLists.size()) {
+    TypeAliasTemplateDecl *OldDecl = 0;
+    TemplateParameterList *OldTemplateParams = 0;
+
+    if (TemplateParamLists.size() != 1) {
+      Diag(UsingLoc, diag::err_alias_template_extra_headers)
+        << SourceRange(TemplateParamLists.get()[1]->getTemplateLoc(),
+         TemplateParamLists.get()[TemplateParamLists.size()-1]->getRAngleLoc());
+    }
+    TemplateParameterList *TemplateParams = TemplateParamLists.get()[0];
+
+    // Only consider previous declarations in the same scope.
+    FilterLookupForScope(Previous, CurContext, S, /*ConsiderLinkage*/false,
+                         /*ExplicitInstantiationOrSpecialization*/false);
+    if (!Previous.empty()) {
+      Redeclaration = true;
+
+      OldDecl = Previous.getAsSingle<TypeAliasTemplateDecl>();
+      if (!OldDecl && !Invalid) {
+        Diag(UsingLoc, diag::err_redefinition_different_kind)
+          << Name.Identifier;
+
+        NamedDecl *OldD = Previous.getRepresentativeDecl();
+        if (OldD->getLocation().isValid())
+          Diag(OldD->getLocation(), diag::note_previous_definition);
+
+        Invalid = true;
+      }
+
+      if (!Invalid && OldDecl && !OldDecl->isInvalidDecl()) {
+        if (TemplateParameterListsAreEqual(TemplateParams,
+                                           OldDecl->getTemplateParameters(),
+                                           /*Complain=*/true,
+                                           TPL_TemplateMatch))
+          OldTemplateParams = OldDecl->getTemplateParameters();
+        else
+          Invalid = true;
+
+        TypeAliasDecl *OldTD = OldDecl->getTemplatedDecl();
+        if (!Invalid &&
+            !Context.hasSameType(OldTD->getUnderlyingType(),
+                                 NewTD->getUnderlyingType())) {
+          // FIXME: The C++0x standard does not clearly say this is ill-formed,
+          // but we can't reasonably accept it.
+          Diag(NewTD->getLocation(), diag::err_redefinition_different_typedef)
+            << 2 << NewTD->getUnderlyingType() << OldTD->getUnderlyingType();
+          if (OldTD->getLocation().isValid())
+            Diag(OldTD->getLocation(), diag::note_previous_definition);
+          Invalid = true;
+        }
+      }
+    }
+
+    // Merge any previous default template arguments into our parameters,
+    // and check the parameter list.
+    if (CheckTemplateParameterList(TemplateParams, OldTemplateParams,
+                                   TPC_TypeAliasTemplate))
+      return 0;
+
+    TypeAliasTemplateDecl *NewDecl =
+      TypeAliasTemplateDecl::Create(Context, CurContext, UsingLoc,
+                                    Name.Identifier, TemplateParams,
+                                    NewTD);
+
+    NewDecl->setAccess(AS);
+
+    if (Invalid)
+      NewDecl->setInvalidDecl();
+    else if (OldDecl)
+      NewDecl->setPreviousDeclaration(OldDecl);
+
+    NewND = NewDecl;
+  } else {
+    ActOnTypedefNameDecl(S, CurContext, NewTD, Previous, Redeclaration);
+    NewND = NewTD;
+  }
 
   if (!Redeclaration)
-    PushOnScopeChains(NewTD, S);
+    PushOnScopeChains(NewND, S);
 
-  return NewTD;
+  return NewND;
 }
 
 Decl *Sema::ActOnNamespaceAliasDef(Scope *S,
@@ -4959,8 +5051,7 @@ CXXConstructorDecl *Sema::DeclareImplicitDefaultConstructor(
                                  /*TInfo=*/0,
                                  /*isExplicit=*/false,
                                  /*isInline=*/true,
-                                 /*isImplicitlyDeclared=*/true,
-                                 /*isExplicitlyDefaulted=*/false);
+                                 /*isImplicitlyDeclared=*/true);
   DefaultCon->setAccess(AS_public);
   DefaultCon->setImplicit();
   DefaultCon->setTrivial(ClassDecl->hasTrivialConstructor());
@@ -5156,8 +5247,7 @@ void Sema::DeclareInheritedConstructors(CXXRecordDecl *ClassDecl) {
         CXXConstructorDecl *NewCtor = CXXConstructorDecl::Create(
             Context, ClassDecl, UsingLoc, DNI, QualType(NewCtorType, 0),
             /*TInfo=*/0, BaseCtor->isExplicit(), /*Inline=*/true,
-            /*ImplicitlyDeclared=*/true,
-            /*isExplicitlyDefaulted*/false);
+            /*ImplicitlyDeclared=*/true);
         NewCtor->setAccess(BaseCtor->getAccess());
 
         // Build up the parameter decls and add them.
@@ -6106,8 +6196,7 @@ CXXConstructorDecl *Sema::DeclareImplicitCopyConstructor(
                                  /*TInfo=*/0,
                                  /*isExplicit=*/false,
                                  /*isInline=*/true,
-                                 /*isImplicitlyDeclared=*/true,
-                                 /*isExplicitlyDefaulted=*/false);
+                                 /*isImplicitlyDeclared=*/true);
   CopyConstructor->setAccess(AS_public);
   CopyConstructor->setTrivial(ClassDecl->hasTrivialCopyConstructor());
   
