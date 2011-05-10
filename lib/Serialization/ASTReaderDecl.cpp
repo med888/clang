@@ -858,7 +858,7 @@ void ASTDeclReader::ReadCXXDefinitionData(
   Data.HasPrivateFields = Record[Idx++];
   Data.HasProtectedFields = Record[Idx++];
   Data.HasPublicFields = Record[Idx++];
-  Data.HasTrivialConstructor = Record[Idx++];
+  Data.HasTrivialDefaultConstructor = Record[Idx++];
   Data.HasConstExprNonCopyMoveConstructor = Record[Idx++];
   Data.HasTrivialCopyConstructor = Record[Idx++];
   Data.HasTrivialMoveConstructor = Record[Idx++];
@@ -867,6 +867,7 @@ void ASTDeclReader::ReadCXXDefinitionData(
   Data.HasTrivialDestructor = Record[Idx++];
   Data.HasNonLiteralTypeFieldsOrBases = Record[Idx++];
   Data.ComputedVisibleConversions = Record[Idx++];
+  Data.NeedsImplicitDefaultConstructor = Record[Idx++];
   Data.DeclaredDefaultConstructor = Record[Idx++];
   Data.DeclaredCopyConstructor = Record[Idx++];
   Data.DeclaredCopyAssignment = Record[Idx++];
@@ -1385,7 +1386,7 @@ static bool isConsumerInterestedIn(Decl *D) {
     return Var->isFileVarDecl() &&
            Var->isThisDeclarationADefinition() == VarDecl::Definition;
   if (FunctionDecl *Func = dyn_cast<FunctionDecl>(D))
-    return Func->isThisDeclarationADefinition();
+    return Func->doesThisDeclarationHaveABody();
   return isa<ObjCProtocolDecl>(D) || isa<ObjCImplementationDecl>(D);
 }
 

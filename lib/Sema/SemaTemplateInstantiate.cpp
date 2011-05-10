@@ -1388,6 +1388,12 @@ static bool NeedsInstantiationAsFunctionType(TypeSourceInfo *T) {
   for (unsigned I = 0, E = FP.getNumArgs(); I != E; ++I) {
     ParmVarDecl *P = FP.getArg(I);
 
+    // The parameter's type as written might be dependent even if the
+    // decayed type was not dependent.
+    if (TypeSourceInfo *TSInfo = P->getTypeSourceInfo())
+      if (TSInfo->getType()->isDependentType())
+        return true;
+
     // TODO: currently we always rebuild expressions.  When we
     // properly get lazier about this, we should use the same
     // logic to avoid rebuilding prototypes here.
@@ -2013,7 +2019,7 @@ Sema::InstantiateClassMembers(SourceLocation PointOfInstantiation,
             SuppressNew)
           continue;
         
-        if (Function->hasBody())
+        if (Function->isDefined())
           continue;
 
         if (TSK == TSK_ExplicitInstantiationDefinition) {
@@ -2023,7 +2029,7 @@ Sema::InstantiateClassMembers(SourceLocation PointOfInstantiation,
           //   specialization and is only an explicit instantiation definition 
           //   of members whose definition is visible at the point of 
           //   instantiation.
-          if (!Pattern->hasBody())
+          if (!Pattern->isDefined())
             continue;
         
           Function->setTemplateSpecializationKind(TSK, PointOfInstantiation);

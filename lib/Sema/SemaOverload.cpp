@@ -1628,6 +1628,15 @@ bool Sema::IsPointerConversion(Expr *From, QualType FromType, QualType ToType,
     return true;
   }
 
+  // MSVC allows implicit function to void* type conversion.
+  if (getLangOptions().Microsoft && FromPointeeType->isFunctionType() &&
+      ToPointeeType->isVoidType()) {
+    ConvertedType = BuildSimilarlyQualifiedPointerType(FromTypePtr,
+                                                       ToPointeeType,
+                                                       ToType, Context);
+    return true;
+  }
+
   // When we're overloading in C, we allow a special kind of pointer
   // conversion for compatible-but-not-identical pointee types.
   if (!getLangOptions().CPlusPlus &&
@@ -2196,6 +2205,13 @@ Sema::IsQualificationConversion(QualType FromType, QualType ToType,
 
     Qualifiers FromQuals = FromType.getQualifiers();
     Qualifiers ToQuals = ToType.getQualifiers();
+    
+    // Allow addition/removal of GC attributes but not changing GC attributes.
+    if (FromQuals.getObjCGCAttr() != ToQuals.getObjCGCAttr() &&
+        (!FromQuals.hasObjCGCAttr() || !ToQuals.hasObjCGCAttr())) {
+      FromQuals.removeObjCGCAttr();
+      ToQuals.removeObjCGCAttr();
+    }
     
     //   -- for every j > 0, if const is in cv 1,j then const is in cv
     //      2,j, and similarly for volatile.
@@ -8781,6 +8797,19 @@ Sema::BuildCallToMemberFunction(Scope *S, Expr *MemExprE,
   if (CheckFunctionCall(Method, TheCall))
     return ExprError();
 
+  if ((isa<CXXConstructorDecl>(CurContext) || 
+       isa<CXXDestructorDecl>(CurContext)) && 
+      TheCall->getMethodDecl()->isPure()) {
+    const CXXMethodDecl *MD = TheCall->getMethodDecl();
+
+    if (isa<CXXThisExpr>(MemExpr->getBase()->IgnoreParenCasts()))
+      Diag(MemExpr->getLocStart(), 
+           diag::warn_call_to_pure_virtual_member_function_from_ctor_dtor)
+        << MD->getDeclName() << isa<CXXDestructorDecl>(CurContext)
+        << MD->getParent()->getDeclName();
+
+      Diag(MD->getLocStart(), diag::note_previous_decl) << MD->getDeclName();
+  }
   return MaybeBindToTemporary(TheCall);
 }
 

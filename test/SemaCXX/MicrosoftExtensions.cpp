@@ -180,3 +180,12 @@ static void static_func() // expected-warning {{static declaration of 'static_fu
 {
 
 }
+
+long function_prototype(int a);
+long (*function_ptr)(int a);
+
+void function_to_voidptr_conv() {
+   void *a1 = function_prototype;
+   void *a2 = &function_prototype;
+   void *a3 = function_ptr;
+}

@@ -924,6 +924,41 @@ static bool ShouldDisableCFI(const ArgList &Args,
   return !UseCFI;
 }
 
+/// \brief Check whether the given input tree contains any compilation actions.
+static bool ContainsCompileAction(const Action *A) {
+  if (isa<CompileJobAction>(A))
+    return true;
+
+  for (Action::const_iterator it = A->begin(), ie = A->end(); it != ie; ++it)
+    if (ContainsCompileAction(*it))
+      return true;
+
+  return false;
+}
+
+/// \brief Check if -relax-all should be passed to the internal assembler.
+/// This is done by default when compiling non-assembler source with -O0.
+static bool UseRelaxAll(Compilation &C, const ArgList &Args) {
+  bool RelaxDefault = true;
+
+  if (Arg *A = Args.getLastArg(options::OPT_O_Group))
+    RelaxDefault = A->getOption().matches(options::OPT_O0);
+
+  if (RelaxDefault) {
+    RelaxDefault = false;
+    for (ActionList::const_iterator it = C.getActions().begin(),
+           ie = C.getActions().end(); it != ie; ++it) {
+      if (ContainsCompileAction(*it)) {
+        RelaxDefault = true;
+        break;
+      }
+    }
+  }
+
+  return Args.hasFlag(options::OPT_mrelax_all, options::OPT_mno_relax_all,
+    RelaxDefault);
+}
+
 void Clang::ConstructJob(Compilation &C, const JobAction &JA,
                          const InputInfo &Output,
                          const InputInfoList &Inputs,
@@ -959,13 +994,7 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   } else if (isa<AssembleJobAction>(JA)) {
     CmdArgs.push_back("-emit-obj");
 
-    // At -O0, we use -mrelax-all by default.
-    bool IsOpt = false;
-    if (Arg *A = Args.getLastArg(options::OPT_O_Group))
-      IsOpt = !A->getOption().matches(options::OPT_O0);
-    if (Args.hasFlag(options::OPT_mrelax_all,
-                     options::OPT_mno_relax_all,
-                     !IsOpt))
+    if (UseRelaxAll(C, Args))
       CmdArgs.push_back("-mrelax-all");
 
     // When using an integrated assembler, translate -Wa, and -Xassembler
@@ -2029,13 +2058,7 @@ void ClangAs::ConstructJob(Compilation &C, const JobAction &JA,
   CmdArgs.push_back("-filetype");
   CmdArgs.push_back("obj");
 
-  // At -O0, we use -mrelax-all by default.
-  bool IsOpt = false;
-  if (Arg *A = Args.getLastArg(options::OPT_O_Group))
-    IsOpt = !A->getOption().matches(options::OPT_O0);
-  if (Args.hasFlag(options::OPT_mrelax_all,
-                    options::OPT_mno_relax_all,
-                    !IsOpt))
+  if (UseRelaxAll(C, Args))
     CmdArgs.push_back("-relax-all");
 
   // Ignore explicit -force_cpusubtype_ALL option.
@@ -3153,13 +3176,13 @@ void darwin::Dsymutil::ConstructJob(Compilation &C, const JobAction &JA,
                                     const char *LinkingOutput) const {
   ArgStringList CmdArgs;
 
+  CmdArgs.push_back("-o");
+  CmdArgs.push_back(Output.getFilename());
+
   assert(Inputs.size() == 1 && "Unable to handle multiple inputs.");
   const InputInfo &Input = Inputs[0];
   assert(Input.isFilename() && "Unexpected dsymutil input.");
   CmdArgs.push_back(Input.getFilename());
-
-  CmdArgs.push_back("-o");
-  CmdArgs.push_back(Output.getFilename());
 
   const char *Exec =
     Args.MakeArgString(getToolChain().GetProgramPath("dsymutil"));

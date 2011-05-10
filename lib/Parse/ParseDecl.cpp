@@ -253,9 +253,17 @@ void Parser::ParseMicrosoftDeclSpec(ParsedAttributes &attrs) {
     SkipUntil(tok::r_paren, true); // skip until ) or ;
     return;
   }
+
   while (Tok.getIdentifierInfo()) {
     IdentifierInfo *AttrName = Tok.getIdentifierInfo();
     SourceLocation AttrNameLoc = ConsumeToken();
+    
+    // FIXME: Remove this when we have proper __declspec(property()) support.
+    // Just skip everything inside property().
+    if (AttrName->getName() == "property") {
+      ConsumeParen();
+      SkipUntil(tok::r_paren);
+    }
     if (Tok.is(tok::l_paren)) {
       ConsumeParen();
       // FIXME: This doesn't parse __declspec(property(get=get_func_name))
@@ -967,9 +975,7 @@ Decl *Parser::ParseDeclarationAfterDeclaratorAndAttributes(Declarator &D,
 
       Actions.SetDeclDeleted(ThisDecl, DelLoc);
     } else if (Tok.is(tok::kw_default)) {
-      SourceLocation DefLoc = ConsumeToken();
-
-      Diag(DefLoc, diag::err_default_special_members);
+      Diag(ConsumeToken(), diag::err_default_special_members);
     } else {
       if (getLang().CPlusPlus && D.getCXXScopeSpec().isSet()) {
         EnterScope(0);

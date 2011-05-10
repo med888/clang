@@ -294,9 +294,15 @@ public:
   /// Generally this answers the question of whether an object with the other
   /// qualifiers can be safely used as an object with these qualifiers.
   bool compatiblyIncludes(Qualifiers other) const {
-    // Non-CVR qualifiers must match exactly.  CVR qualifiers may subset.
-    return ((Mask & ~CVRMask) == (other.Mask & ~CVRMask)) &&
-           (((Mask & CVRMask) | (other.Mask & CVRMask)) == (Mask & CVRMask));
+    return 
+      // Address spaces must match exactly.
+      getAddressSpace() == other.getAddressSpace() &&
+      // ObjC GC qualifiers can match, be added, or be removed, but can't be
+      // changed.
+      (getObjCGCAttr() == other.getObjCGCAttr() ||
+       !hasObjCGCAttr() || !other.hasObjCGCAttr()) &&
+      // CVR qualifiers may subset.
+      (((Mask & CVRMask) | (other.Mask & CVRMask)) == (Mask & CVRMask));
   }
 
   /// \brief Determine whether this set of qualifiers is a strict superset of
@@ -1418,14 +1424,12 @@ public:
 
   /// isSignedIntegerType - Return true if this is an integer type that is
   /// signed, according to C99 6.2.5p4 [char, signed char, short, int, long..],
-  /// an enum decl which has a signed representation, or a vector of signed
-  /// integer element type.
+  /// or an enum decl which has a signed representation.
   bool isSignedIntegerType() const;
 
   /// isUnsignedIntegerType - Return true if this is an integer type that is
-  /// unsigned, according to C99 6.2.5p6 [which returns true for _Bool], an enum
-  /// decl which has an unsigned representation, or a vector of unsigned integer
-  /// element type.
+  /// unsigned, according to C99 6.2.5p6 [which returns true for _Bool], 
+  /// or an enum decl which has an unsigned representation.
   bool isUnsignedIntegerType() const;
 
   /// isConstantSizeType - Return true if this is not a variable sized type,

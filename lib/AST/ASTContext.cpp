@@ -558,6 +558,18 @@ bool ASTContext::BitfieldFollowsBitfield(const FieldDecl *FD,
           LastFD->getBitWidth()-> EvaluateAsInt(*this).getZExtValue());  
 }
 
+bool ASTContext::NoneBitfieldFollowsBitfield(const FieldDecl *FD,
+                                         const FieldDecl *LastFD) const {
+  return (!FD->isBitField() && LastFD && LastFD->isBitField() &&
+          LastFD->getBitWidth()-> EvaluateAsInt(*this).getZExtValue());  
+}
+
+bool ASTContext::BitfieldFollowsNoneBitfield(const FieldDecl *FD,
+                                             const FieldDecl *LastFD) const {
+  return (FD->isBitField() && LastFD && !LastFD->isBitField() &&
+          FD->getBitWidth()-> EvaluateAsInt(*this).getZExtValue());  
+}
+
 ASTContext::overridden_cxx_method_iterator
 ASTContext::overridden_methods_begin(const CXXMethodDecl *Method) const {
   llvm::DenseMap<const CXXMethodDecl *, CXXMethodVector>::const_iterator Pos
@@ -6100,7 +6112,7 @@ bool ASTContext::DeclMustBeEmitted(const Decl *D) {
 
   if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(D)) {
     // Forward declarations aren't required.
-    if (!FD->isThisDeclarationADefinition())
+    if (!FD->doesThisDeclarationHaveABody())
       return false;
 
     // Constructors and destructors are required.
@@ -6137,10 +6149,13 @@ bool ASTContext::DeclMustBeEmitted(const Decl *D) {
   // Structs that have non-trivial constructors or destructors are required.
 
   // FIXME: Handle references.
+  // FIXME: Be more selective about which constructors we care about.
   if (const RecordType *RT = VD->getType()->getAs<RecordType>()) {
     if (const CXXRecordDecl *RD = dyn_cast<CXXRecordDecl>(RT->getDecl())) {
-      if (RD->hasDefinition() &&
-          (!RD->hasTrivialConstructor() || !RD->hasTrivialDestructor()))
+      if (RD->hasDefinition() && !(RD->hasTrivialDefaultConstructor() &&
+                                   RD->hasTrivialCopyConstructor() &&
+                                   RD->hasTrivialMoveConstructor() &&
+                                   RD->hasTrivialDestructor()))
         return true;
     }
   }

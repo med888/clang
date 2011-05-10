@@ -936,7 +936,7 @@ public:
   Decl *HandleDeclarator(Scope *S, Declarator &D,
                          MultiTemplateParamsArg TemplateParameterLists,
                          bool IsFunctionDefinition,
-                         SourceLocation DefLoc = SourceLocation());
+                         SourceLocation DefaultLoc = SourceLocation());
   void RegisterLocallyScopedExternCDecl(NamedDecl *ND,
                                         const LookupResult &Previous,
                                         Scope *S);
@@ -965,7 +965,7 @@ public:
                                      MultiTemplateParamsArg TemplateParamLists,
                                      bool IsFunctionDefinition,
                                      bool &Redeclaration,
-                                     SourceLocation DefLoc = SourceLocation());
+                                   SourceLocation DefaultLoc = SourceLocation());
   bool AddOverriddenMethods(CXXRecordDecl *DC, CXXMethodDecl *MD);
   void DiagnoseHiddenVirtualMethods(CXXRecordDecl *DC, CXXMethodDecl *MD);
   void CheckFunctionDeclaration(Scope *S,
@@ -1105,7 +1105,7 @@ public:
 
   enum CXXSpecialMember {
     CXXInvalid = -1,
-    CXXConstructor = 0,
+    CXXDefaultConstructor = 0,
     CXXCopyConstructor = 1,
     CXXCopyAssignment = 2,
     CXXDestructor = 3
@@ -2385,6 +2385,8 @@ public:
 
   bool CheckCaseExpression(Expr *expr);
 
+  bool CheckMicrosoftIfExistsSymbol(CXXScopeSpec &SS, UnqualifiedId &Name);
+
   //===------------------------- "Block" Extension ------------------------===//
 
   /// ActOnBlockStart - This callback is invoked when a block literal is
@@ -2523,6 +2525,62 @@ public:
   /// FinalizeVarWithDestructor - Prepare for calling destructor on the
   /// constructed variable.
   void FinalizeVarWithDestructor(VarDecl *VD, const RecordType *DeclInitType);
+
+  /// \brief Helper class that collects exception specifications for 
+  /// implicitly-declared special member functions.
+  class ImplicitExceptionSpecification {
+    ASTContext &Context;
+    // We order exception specifications thus:
+    // noexcept is the most restrictive, but is only used in C++0x.
+    // throw() comes next.
+    // Then a throw(collected exceptions)
+    // Finally no specification.
+    // throw(...) is used instead if any called function uses it.
+    ExceptionSpecificationType ComputedEST;
+    llvm::SmallPtrSet<CanQualType, 4> ExceptionsSeen;
+    llvm::SmallVector<QualType, 4> Exceptions;
+
+    void ClearExceptions() {
+      ExceptionsSeen.clear();
+      Exceptions.clear();
+    }
+
+  public:
+    explicit ImplicitExceptionSpecification(ASTContext &Context) 
+      : Context(Context), ComputedEST(EST_BasicNoexcept) {
+      if (!Context.getLangOptions().CPlusPlus0x)
+        ComputedEST = EST_DynamicNone;
+    }
+
+    /// \brief Get the computed exception specification type.
+    ExceptionSpecificationType getExceptionSpecType() const {
+      assert(ComputedEST != EST_ComputedNoexcept &&
+             "noexcept(expr) should not be a possible result");
+      return ComputedEST;
+    }
+
+    /// \brief The number of exceptions in the exception specification.
+    unsigned size() const { return Exceptions.size(); }
+
+    /// \brief The set of exceptions in the exception specification.
+    const QualType *data() const { return Exceptions.data(); }
+
+    /// \brief Integrate another called method into the collected data.
+    void CalledDecl(CXXMethodDecl *Method);
+
+    FunctionProtoType::ExtProtoInfo getEPI() const {
+      FunctionProtoType::ExtProtoInfo EPI;
+      EPI.ExceptionSpecType = getExceptionSpecType();
+      EPI.NumExceptions = size();
+      EPI.Exceptions = data();
+      return EPI;
+    }
+  };
+
+  /// \brief Determine what sort of exception specification a defaulted
+  /// constructor of a class will have.
+  ImplicitExceptionSpecification
+  ComputeDefaultedDefaultCtorExceptionSpec(CXXRecordDecl *ClassDecl);
 
   /// \brief Declare the implicit default constructor for the given class.
   ///
@@ -3066,7 +3124,7 @@ public:
                                  Expr *BitfieldWidth, const VirtSpecifiers &VS,
                                  Expr *Init, bool IsDefinition,
                                  bool Deleted = false,
-                                 SourceLocation DefLoc = SourceLocation());
+                                 SourceLocation DefaultLoc = SourceLocation());
 
   MemInitResult ActOnMemInitializer(Decl *ConstructorD,
                                     Scope *S,
@@ -3196,6 +3254,9 @@ public:
   void CheckConversionDeclarator(Declarator &D, QualType &R,
                                  StorageClass& SC);
   Decl *ActOnConversionDeclarator(CXXConversionDecl *Conversion);
+
+  void CheckExplicitlyDefaultedMethods(CXXRecordDecl *Record);
+  void CheckExplicitlyDefaultedDefaultConstructor(CXXConstructorDecl *Ctor);
 
   //===--------------------------------------------------------------------===//
   // C++ Derived Classes

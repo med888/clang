@@ -1157,6 +1157,9 @@ public:
   void GenerateThunk(llvm::Function *Fn, const CGFunctionInfo &FnInfo,
                      GlobalDecl GD, const ThunkInfo &Thunk);
 
+  void GenerateVarArgsThunk(llvm::Function *Fn, const CGFunctionInfo &FnInfo,
+                            GlobalDecl GD, const ThunkInfo &Thunk);
+
   void EmitCtorPrologue(const CXXConstructorDecl *CD, CXXCtorType Type,
                         FunctionArgList &Args);
 
@@ -1915,6 +1918,9 @@ public:
   RValue EmitCXXMemberPointerCallExpr(const CXXMemberCallExpr *E,
                                       ReturnValueSlot ReturnValue);
 
+  llvm::Value *EmitCXXOperatorMemberCallee(const CXXOperatorCallExpr *E,
+                                           const CXXMethodDecl *MD,
+                                           llvm::Value *This);
   RValue EmitCXXOperatorMemberCallExpr(const CXXOperatorCallExpr *E,
                                        const CXXMethodDecl *MD,
                                        ReturnValueSlot ReturnValue);

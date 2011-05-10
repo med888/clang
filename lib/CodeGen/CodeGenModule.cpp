@@ -729,7 +729,7 @@ void CodeGenModule::EmitGlobal(GlobalDecl GD) {
     }
 
     // Forward declarations are emitted lazily on first use.
-    if (!FD->isThisDeclarationADefinition())
+    if (!FD->doesThisDeclarationHaveABody())
       return;
   } else {
     const VarDecl *VD = cast<VarDecl>(Global);
@@ -795,14 +795,19 @@ void CodeGenModule::EmitGlobalDefinition(GlobalDecl GD) {
       return;
 
     if (const CXXMethodDecl *Method = dyn_cast<CXXMethodDecl>(D)) {
+      // Make sure to emit the definition(s) before we emit the thunks.
+      // This is necessary for the generation of certain thunks.
+      if (const CXXConstructorDecl *CD = dyn_cast<CXXConstructorDecl>(Method))
+        EmitCXXConstructor(CD, GD.getCtorType());
+      else if (const CXXDestructorDecl *DD =dyn_cast<CXXDestructorDecl>(Method))
+        EmitCXXDestructor(DD, GD.getDtorType());
+      else
+        EmitGlobalFunctionDefinition(GD);
+
       if (Method->isVirtual())
         getVTables().EmitThunks(GD);
 
-      if (const CXXConstructorDecl *CD = dyn_cast<CXXConstructorDecl>(Method))
-        return EmitCXXConstructor(CD, GD.getCtorType());
-  
-      if (const CXXDestructorDecl *DD = dyn_cast<CXXDestructorDecl>(Method))
-        return EmitCXXDestructor(DD, GD.getDtorType());
+      return;
     }
 
     return EmitGlobalFunctionDefinition(GD);
@@ -894,7 +899,7 @@ CodeGenModule::GetOrCreateLLVMFunction(llvm::StringRef MangledName,
           assert(FD->isUsed() && "Sema didn't mark implicit function as used!");
           DeferredDeclsToEmit.push_back(D.getWithDecl(FD));
           break;
-        } else if (FD->isThisDeclarationADefinition()) {
+        } else if (FD->doesThisDeclarationHaveABody()) {
           DeferredDeclsToEmit.push_back(D.getWithDecl(FD));
           break;
         }
@@ -935,14 +940,17 @@ CodeGenModule::CreateRuntimeFunction(const llvm::FunctionType *FTy,
   return GetOrCreateLLVMFunction(Name, FTy, GlobalDecl(), /*ForVTable=*/false);
 }
 
-static bool DeclIsConstantGlobal(ASTContext &Context, const VarDecl *D) {
+static bool DeclIsConstantGlobal(ASTContext &Context, const VarDecl *D,
+                                 bool ConstantInit) {
   if (!D->getType().isConstant(Context) && !D->getType()->isReferenceType())
     return false;
-  if (Context.getLangOptions().CPlusPlus &&
-      Context.getBaseElementType(D->getType())->getAs<RecordType>()) {
-    // FIXME: We should do something fancier here!
-    return false;
+  
+  if (Context.getLangOptions().CPlusPlus) {
+    if (const RecordType *Record 
+          = Context.getBaseElementType(D->getType())->getAs<RecordType>())
+      return ConstantInit && cast<CXXRecordDecl>(Record->getDecl())->isPOD();
   }
+  
   return true;
 }
 
@@ -999,7 +1007,7 @@ CodeGenModule::GetOrCreateLLVMGlobal(llvm::StringRef MangledName,
   if (D) {
     // FIXME: This code is overly simple and should be merged with other global
     // handling.
-    GV->setConstant(DeclIsConstantGlobal(Context, D));
+    GV->setConstant(DeclIsConstantGlobal(Context, D, false));
 
     // Set linkage and visibility in case we never see a definition.
     NamedDecl::LinkageInfo LV = D->getLinkageAndVisibility();
@@ -1281,7 +1289,7 @@ void CodeGenModule::EmitGlobalVarDefinition(const VarDecl *D) {
 
   // If it is safe to mark the global 'constant', do so now.
   GV->setConstant(false);
-  if (!NonConstInit && DeclIsConstantGlobal(Context, D))
+  if (!NonConstInit && DeclIsConstantGlobal(Context, D, true))
     GV->setConstant(true);
 
   GV->setAlignment(getContext().getDeclAlign(D).getQuantity());

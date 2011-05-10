@@ -1269,19 +1269,32 @@ void RecordLayoutBuilder::LayoutFields(const RecordDecl *D) {
       // ignored:
       else if (Context.ZeroBitfieldFollowsNonBitfield(FD, LastFD))
         continue;
-      else if (Context.BitfieldFollowsBitfield(FD, LastFD)) {
-        // Adjacent bit fields are packed into the same 1-, 2-, or
+      // FIXME. streamline these conditions into a simple one.
+      else if (Context.BitfieldFollowsBitfield(FD, LastFD) ||
+               Context.BitfieldFollowsNoneBitfield(FD, LastFD) ||
+               Context.NoneBitfieldFollowsBitfield(FD, LastFD)) {
+        // 1) Adjacent bit fields are packed into the same 1-, 2-, or
         // 4-byte allocation unit if the integral types are the same
         // size and if the next bit field fits into the current
         // allocation unit without crossing the boundary imposed by the
         // common alignment requirements of the bit fields.
+        // 2) Establish a new alignment for a bitfield following
+        // a non-bitfield if size of their types differ.
+        // 3) Establish a new alignment for a non-bitfield following
+        // a bitfield if size of their types differ.
         std::pair<uint64_t, unsigned> FieldInfo = 
           Context.getTypeInfo(FD->getType());
         uint64_t TypeSize = FieldInfo.first;
         unsigned FieldAlign = FieldInfo.second;
+        // This check is needed for 'long long' in -m32 mode.
+        if (TypeSize > FieldAlign)
+          FieldAlign = TypeSize;
         FieldInfo = Context.getTypeInfo(LastFD->getType());
         uint64_t TypeSizeLastFD = FieldInfo.first;
         unsigned FieldAlignLastFD = FieldInfo.second;
+        // This check is needed for 'long long' in -m32 mode.
+        if (TypeSizeLastFD > FieldAlignLastFD)
+          FieldAlignLastFD = TypeSizeLastFD;
         if (TypeSizeLastFD != TypeSize) {
           uint64_t UnpaddedFieldOffset = 
             getDataSizeInBits() - UnfilledBitsInLastByte;
@@ -1374,6 +1387,10 @@ void RecordLayoutBuilder::LayoutBitField(const FieldDecl *D) {
   std::pair<uint64_t, unsigned> FieldInfo = Context.getTypeInfo(D->getType());
   uint64_t TypeSize = FieldInfo.first;
   unsigned FieldAlign = FieldInfo.second;
+  
+  // This check is needed for 'long long' in -m32 mode.
+  if (IsMsStruct && (TypeSize > FieldAlign))
+    FieldAlign = TypeSize;
   
   if (ZeroLengthBitfield) {
     // If a zero-length bitfield is inserted after a bitfield,

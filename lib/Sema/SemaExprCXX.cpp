@@ -385,13 +385,14 @@ static UuidAttr *GetUuidAttrOfType(QualType QT) {
   else if (QT->isArrayType())
     Ty = cast<ArrayType>(QT)->getElementType().getTypePtr();
 
-  // Loop all class definition and declaration looking for an uuid attribute.
+  // Loop all record redeclaration looking for an uuid attribute.
   CXXRecordDecl *RD = Ty->getAsCXXRecordDecl();
-  while (RD) {
-    if (UuidAttr *Uuid = RD->getAttr<UuidAttr>())
+  for (CXXRecordDecl::redecl_iterator I = RD->redecls_begin(),
+       E = RD->redecls_end(); I != E; ++I) {
+    if (UuidAttr *Uuid = I->getAttr<UuidAttr>())
       return Uuid;
-    RD = RD->getPreviousDeclaration();
   }
+
   return 0;
 }
 
@@ -2433,7 +2434,7 @@ static bool CheckUnaryTypeTraitTypeCompleteness(Sema &S,
   case UTT_HasNothrowConstructor:
   case UTT_HasNothrowCopy:
   case UTT_HasTrivialAssign:
-  case UTT_HasTrivialConstructor:
+  case UTT_HasTrivialDefaultConstructor:
   case UTT_HasTrivialCopy:
   case UTT_HasTrivialDestructor:
   case UTT_HasVirtualDestructor:
@@ -2543,7 +2544,7 @@ static bool EvaluateUnaryTypeTrait(Sema &Self, UnaryTypeTrait UTT,
     //
     //   1: http://gcc.gnu/.org/onlinedocs/gcc/Type-Traits.html
     //   2: http://docwiki.embarcadero.com/RADStudio/XE/en/Type_Trait_Functions_(C%2B%2B0x)_Index
-  case UTT_HasTrivialConstructor:
+  case UTT_HasTrivialDefaultConstructor:
     // http://gcc.gnu.org/onlinedocs/gcc/Type-Traits.html:
     //   If __is_pod (type) is true then the trait is true, else if type is
     //   a cv class or union type (or array thereof) with a trivial default
@@ -2552,7 +2553,7 @@ static bool EvaluateUnaryTypeTrait(Sema &Self, UnaryTypeTrait UTT,
       return true;
     if (const RecordType *RT =
           C.getBaseElementType(T)->getAs<RecordType>())
-      return cast<CXXRecordDecl>(RT->getDecl())->hasTrivialConstructor();
+      return cast<CXXRecordDecl>(RT->getDecl())->hasTrivialDefaultConstructor();
     return false;
   case UTT_HasTrivialCopy:
     // http://gcc.gnu.org/onlinedocs/gcc/Type-Traits.html:
@@ -2693,7 +2694,7 @@ static bool EvaluateUnaryTypeTrait(Sema &Self, UnaryTypeTrait UTT,
       return true;
     if (const RecordType *RT = C.getBaseElementType(T)->getAs<RecordType>()) {
       CXXRecordDecl *RD = cast<CXXRecordDecl>(RT->getDecl());
-      if (RD->hasTrivialConstructor())
+      if (RD->hasTrivialDefaultConstructor())
         return true;
 
       DeclContext::lookup_const_iterator Con, ConEnd;
@@ -4294,4 +4295,19 @@ StmtResult Sema::ActOnFinishFullStmt(Stmt *FullStmt) {
   if (!FullStmt) return StmtError();
 
   return MaybeCreateStmtWithCleanups(FullStmt);
+}
+
+bool Sema::CheckMicrosoftIfExistsSymbol(CXXScopeSpec &SS,
+                                        UnqualifiedId &Name) {
+  DeclarationNameInfo TargetNameInfo = GetNameFromUnqualifiedId(Name);
+  DeclarationName TargetName = TargetNameInfo.getName();
+  if (!TargetName)
+    return false;
+
+  // Do the redeclaration lookup in the current scope.
+  LookupResult R(*this, TargetNameInfo, Sema::LookupAnyName,
+                 Sema::NotForRedeclaration);
+  R.suppressDiagnostics();
+  LookupParsedName(R, getCurScope(), &SS);
+  return !R.empty(); 
 }

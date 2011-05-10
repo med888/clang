@@ -728,6 +728,10 @@ def err_implicit_object_parameter_init : Error<
 def err_qualified_member_of_unrelated : Error<
   "%q0 is not a member of class %1">;
 
+def warn_call_to_pure_virtual_member_function_from_ctor_dtor : Warning<
+  "call to pure virtual member function %0; overrides of %0 in subclasses are "
+  "not available in the %select{constructor|destructor}1 of %2">;
+
 def note_field_decl : Note<"member is declared here">;
 def note_ivar_decl : Note<"ivar is declared here">;
 def note_bitfield_decl : Note<"bit-field is declared here">;
@@ -754,7 +758,9 @@ def err_static_data_member_not_allowed_in_union_or_anon_struct : Error<
   "static data member %0 not allowed in %select{anonymous struct|union}1">; 
 def err_union_member_of_reference_type : Error<
   "union member %0 has reference type %1">;
-
+def ext_anonymous_struct_union_qualified : Extension<
+  "anonymous %select{struct|union}0 cannot be '%select{const|volatile|"
+  "restrict}1'">;
 def err_different_return_type_for_overriding_virtual_function : Error<
   "virtual function %0 has a different return type (%1) than the "
   "function it overrides (which has return type %2)">;
@@ -2143,6 +2149,9 @@ def err_redefinition : Error<"redefinition of %0">;
 def err_definition_of_implicitly_declared_member : Error<
   "definition of implicitly declared %select{constructor|copy constructor|"
   "copy assignment operator|destructor}1">;
+def err_definition_of_explicitly_defaulted_member : Error<
+  "definition of explicitly defaulted %select{constructor|copy constructor|"
+  "copy assignment operator|destructor}0">;
 def err_redefinition_extern_inline : Error<
   "redefinition of a 'extern inline' function %0 is not supported in "
   "%select{C99 mode|C++}1">;
@@ -3612,6 +3621,12 @@ def warn_not_compound_assign : Warning<
 // C++0x explicit conversion operators
 def warn_explicit_conversion_functions : Warning<
   "explicit conversion functions are a C++0x extension">, InGroup<CXX0x>;
+
+// C++0x defaulted functions
+def err_defaulted_default_ctor_params : Error<
+  "an explicitly-defaulted default constructor must have no parameters">;
+def err_incorrect_defaulted_exception_spec : Error<
+  "exception specification of explicitly defaulted function is incorrect">;
 
 def warn_array_index_precedes_bounds : Warning<
   "array index of '%0' indexes before the beginning of the array">,
