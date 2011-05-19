@@ -973,7 +973,7 @@ private:
 
   Decl *ParseCXXInlineMethodDef(AccessSpecifier AS, ParsingDeclarator &D,
                                 const ParsedTemplateInfo &TemplateInfo,
-                                const VirtSpecifiers& VS);
+                                const VirtSpecifiers& VS, ExprResult& Init);
   void ParseLexedMethodDeclarations(ParsingClass &Class);
   void ParseLexedMethodDeclaration(LateParsedMethodDeclaration &LM);
   void ParseLexedMethodDefs(ParsingClass &Class);
@@ -1000,7 +1000,7 @@ private:
 
   DeclGroupPtrTy ParseExternalDeclaration(ParsedAttributesWithRange &attrs,
                                           ParsingDeclSpec *DS = 0);
-  bool isDeclarationAfterDeclarator() const;
+  bool isDeclarationAfterDeclarator();
   bool isStartOfFunctionDefinition(const ParsingDeclarator &Declarator);
   DeclGroupPtrTy ParseDeclarationOrFunctionDefinition(ParsedAttributes &attrs,
                                                   AccessSpecifier AS = AS_none);
@@ -1648,6 +1648,7 @@ bool ParseAsmOperandsOpt(llvm::SmallVectorImpl<IdentifierInfo *> &Names,
 
   void ParseTypeofSpecifier(DeclSpec &DS);
   void ParseDecltypeSpecifier(DeclSpec &DS);
+  void ParseUnderlyingTypeSpecifier(DeclSpec &DS);
   
   ExprResult ParseCXX0XAlignArgument(SourceLocation Start);
 

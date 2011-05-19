@@ -1423,17 +1423,15 @@ Sema::AccessResult Sema::CheckConstructorAccess(SourceLocation UseLoc,
     break;
 
   case InitializedEntity::EK_Base:
-    AccessEntity.setDiag(PDiag(diag::err_access_base)
+    AccessEntity.setDiag(PDiag(diag::err_access_base_ctor)
                           << Entity.isInheritedVirtualBase()
-                          << Entity.getBaseSpecifier()->getType()
-                          << getSpecialMember(Constructor));
+                          << Entity.getBaseSpecifier()->getType());
     break;
 
   case InitializedEntity::EK_Member: {
     const FieldDecl *Field = cast<FieldDecl>(Entity.getDecl());
-    AccessEntity.setDiag(PDiag(diag::err_access_field)
-                          << Field->getType()
-                          << getSpecialMember(Constructor));
+    AccessEntity.setDiag(PDiag(diag::err_access_field_ctor)
+                          << Field->getType());
     break;
   }
 
@@ -1465,7 +1463,8 @@ Sema::AccessResult Sema::CheckDirectMemberAccess(SourceLocation UseLoc,
 Sema::AccessResult Sema::CheckAllocationAccess(SourceLocation OpLoc,
                                                SourceRange PlacementRange,
                                                CXXRecordDecl *NamingClass,
-                                               DeclAccessPair Found) {
+                                               DeclAccessPair Found,
+                                               bool Diagnose) {
   if (!getLangOptions().AccessControl ||
       !NamingClass ||
       Found.getAccess() == AS_public)
@@ -1473,8 +1472,9 @@ Sema::AccessResult Sema::CheckAllocationAccess(SourceLocation OpLoc,
 
   AccessTarget Entity(Context, AccessTarget::Member, NamingClass, Found,
                       QualType());
-  Entity.setDiag(diag::err_access)
-    << PlacementRange;
+  if (Diagnose)
+    Entity.setDiag(diag::err_access)
+      << PlacementRange;
 
   return CheckAccess(*this, OpLoc, Entity);
 }

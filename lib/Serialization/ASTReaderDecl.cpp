@@ -429,6 +429,8 @@ void ASTDeclReader::VisitFunctionDecl(FunctionDecl *FD) {
   FD->HasWrittenPrototype = Record[Idx++];
   FD->IsDeleted = Record[Idx++];
   FD->IsTrivial = Record[Idx++];
+  FD->IsDefaulted = Record[Idx++];
+  FD->IsExplicitlyDefaulted = Record[Idx++];
   FD->HasImplicitReturnZero = Record[Idx++];
   FD->EndRangeLoc = ReadSourceLocation(Record, Idx);
 
@@ -858,6 +860,7 @@ void ASTDeclReader::ReadCXXDefinitionData(
   Data.HasPrivateFields = Record[Idx++];
   Data.HasProtectedFields = Record[Idx++];
   Data.HasPublicFields = Record[Idx++];
+  Data.HasMutableFields = Record[Idx++];
   Data.HasTrivialDefaultConstructor = Record[Idx++];
   Data.HasConstExprNonCopyMoveConstructor = Record[Idx++];
   Data.HasTrivialCopyConstructor = Record[Idx++];
@@ -867,7 +870,7 @@ void ASTDeclReader::ReadCXXDefinitionData(
   Data.HasTrivialDestructor = Record[Idx++];
   Data.HasNonLiteralTypeFieldsOrBases = Record[Idx++];
   Data.ComputedVisibleConversions = Record[Idx++];
-  Data.NeedsImplicitDefaultConstructor = Record[Idx++];
+  Data.UserProvidedDefaultConstructor = Record[Idx++];
   Data.DeclaredDefaultConstructor = Record[Idx++];
   Data.DeclaredCopyConstructor = Record[Idx++];
   Data.DeclaredCopyAssignment = Record[Idx++];

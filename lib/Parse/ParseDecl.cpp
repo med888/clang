@@ -968,14 +968,17 @@ Decl *Parser::ParseDeclarationAfterDeclaratorAndAttributes(Declarator &D,
                                diag::err_invalid_equalequal_after_declarator)) {
     ConsumeToken();
     if (Tok.is(tok::kw_delete)) {
-      SourceLocation DelLoc = ConsumeToken();
-      
-      if (!getLang().CPlusPlus0x)
-        Diag(DelLoc, diag::warn_deleted_function_accepted_as_extension);
-
-      Actions.SetDeclDeleted(ThisDecl, DelLoc);
+      if (D.isFunctionDeclarator())
+        Diag(ConsumeToken(), diag::err_default_delete_in_multiple_declaration)
+          << 1 /* delete */;
+      else
+        Diag(ConsumeToken(), diag::err_deleted_non_function);
     } else if (Tok.is(tok::kw_default)) {
-      Diag(ConsumeToken(), diag::err_default_special_members);
+      if (D.isFunctionDeclarator())
+        Diag(Tok, diag::err_default_delete_in_multiple_declaration)
+          << 1 /* delete */;
+      else
+        Diag(ConsumeToken(), diag::err_default_special_members);
     } else {
       if (getLang().CPlusPlus && D.getCXXScopeSpec().isSet()) {
         EnterScope(0);
@@ -1856,6 +1859,9 @@ void Parser::ParseDeclarationSpecifiers(DeclSpec &DS,
       ParseDecltypeSpecifier(DS);
       continue;
 
+    case tok::kw___underlying_type:
+      ParseUnderlyingTypeSpecifier(DS);
+
     // OpenCL qualifiers:
     case tok::kw_private: 
       if (!getLang().OpenCL)
@@ -2124,6 +2130,11 @@ bool Parser::ParseOptionalTypeSpecifier(DeclSpec &DS, bool& isInvalid,
   // C++0x decltype support.
   case tok::kw_decltype:
     ParseDecltypeSpecifier(DS);
+    return true;
+
+  // C++0x type traits support.
+  case tok::kw___underlying_type:
+    ParseUnderlyingTypeSpecifier(DS);
     return true;
 
   // OpenCL qualifiers:

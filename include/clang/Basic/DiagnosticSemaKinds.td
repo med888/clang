@@ -376,7 +376,8 @@ def warn_conflicting_ret_types : Warning<
   "conflicting return type in implementation of %0: %1 vs %2">;
 def warn_conflicting_ret_type_modifiers : Warning<
   "conflicting distributed object modifiers on return type "
-  "in implementation of %0">;
+  "in implementation of %0">,
+  InGroup<DiagGroup<"distributed-object-modifiers">>;
 def warn_non_covariant_ret_types : Warning<
   "conflicting return type in implementation of %0: %1 vs %2">,
   InGroup<DiagGroup<"method-signatures">>, DefaultIgnore;
@@ -385,7 +386,8 @@ def warn_conflicting_param_types : Warning<
   "conflicting parameter types in implementation of %0: %1 vs %2">;
 def warn_conflicting_param_modifiers : Warning<
   "conflicting distributed object modifiers on parameter type "
-  "in implementation of %0">;
+  "in implementation of %0">,
+  InGroup<DiagGroup<"distributed-object-modifiers">>;
 def warn_non_contravariant_param_types : Warning<
   "conflicting parameter types in implementation of %0: %1 vs %2">,
   InGroup<DiagGroup<"method-signatures">>, DefaultIgnore;
@@ -509,11 +511,12 @@ def err_unexpected_friend : Error<
 def ext_enum_friend : ExtWarn<
   "enumeration type %0 cannot be a friend">;
 def ext_nonclass_type_friend : ExtWarn<
-  "non-class type %0 cannot be a friend">;
+  "non-class friend type %0 is a C++0x extension">, InGroup<CXX0x>;
 def err_friend_is_member : Error<
   "friends cannot be members of the declaring class">;
 def ext_unelaborated_friend_type : ExtWarn<
-  "must specify '%select{struct|union|class|enum}0' to befriend %1">;
+  "specify '%select{struct|union|class|enum}0' to befriend %1; accepted "
+  "as a C++0x extension">, InGroup<CXX0x>;
 def err_qualified_friend_not_found : Error<
   "no function named %0 with type %1 was found in the specified scope">;
 def err_introducing_special_friend : Error<
@@ -550,8 +553,6 @@ def err_type_defined_in_alias_template : Error<
 def note_pure_virtual_function : Note<
   "unimplemented pure virtual method %0 in %1">;
 
-def err_deleted_non_function : Error<
-  "only functions can have deleted definitions">;
 def err_deleted_decl_not_first : Error<
   "deleted definition must be first declaration">;
 
@@ -600,13 +601,11 @@ def ext_rvalue_to_reference_access_ctor : ExtWarn<
   "C++98 requires an accessible copy constructor for class %2 when binding "
   "a reference to a temporary; was %select{private|protected}0">,
   AccessControl, InGroup<BindToTemporaryCopy>;
-def err_access_base : Error<
+def err_access_base_ctor : Error<
   "%select{base class|inherited virtual base class}0 %1 has %select{private|"
-  "protected}3 %select{constructor|copy constructor|copy assignment operator|"
-  "destructor}2">, AccessControl;
-def err_access_field: Error<
-  "field of type %0 has %select{private|protected}2 %select{constructor|copy "
-  "constructor|copy assignment operator|destructor}1">, AccessControl;
+  "protected}2 constructor">, AccessControl;
+def err_access_field_ctor : Error<
+  "field of type %0 has %select{private|protected}1 constructor">, AccessControl;
 
 def err_access_ctor_field :
     Error<"field of type %1 has %select{private|protected}2 constructor">,
@@ -722,6 +721,9 @@ def err_member_function_initialization : Error<
   "initializer on function does not look like a pure-specifier">;
 def err_non_virtual_pure : Error<
   "%0 is not virtual and cannot be declared pure">;
+def warn_pure_function_definition : ExtWarn<
+  "function definition with pure-specifier is a Microsoft extension">,
+  InGroup<Microsoft>;
 def err_implicit_object_parameter_init : Error<
   "cannot initialize object parameter of type %0 with an expression "
   "of type %1">;
@@ -1013,6 +1015,10 @@ def err_enum_redeclare_fixed_mismatch : Error<
   "enumeration previously declared with %select{non|}0fixed underlying type">;
 def err_enum_redeclare_scoped_mismatch : Error<
   "enumeration previously declared as %select{un|}0scoped">;
+def err_only_enums_have_underlying_types : Error<
+  "only enumeration types have underlying types">;
+def err_incomplete_type_no_underlying_type : Error<
+  "an incomplete enumeration type has no underlying type yet">;
 
 // C++0x delegating constructors
 def err_delegation_0x_only : Error<
@@ -2135,7 +2141,8 @@ def err_unavailable_message : Error<"%0 is unavailable: %1">;
 def warn_unavailable_fwdclass_message : Warning<
     "%0 maybe unavailable because receiver type is unknown">;
 def note_unavailable_here : Note<
-  "function has been explicitly marked %select{unavailable|deleted|deprecated}0 here">;
+  "function has been explicitly marked "
+  "%select{unavailable|deleted|deprecated}0 here">;
 def warn_not_enough_argument : Warning<
   "not enough variable arguments in %0 declaration to fit a sentinel">;
 def warn_missing_sentinel : Warning <
@@ -2147,11 +2154,11 @@ def warn_missing_prototype : Warning<
   InGroup<DiagGroup<"missing-prototypes">>, DefaultIgnore;
 def err_redefinition : Error<"redefinition of %0">;
 def err_definition_of_implicitly_declared_member : Error<
-  "definition of implicitly declared %select{constructor|copy constructor|"
-  "copy assignment operator|destructor}1">;
+  "definition of implicitly declared %select{default constructor|copy "
+  "constructor|copy assignment operator|destructor}1">;
 def err_definition_of_explicitly_defaulted_member : Error<
-  "definition of explicitly defaulted %select{constructor|copy constructor|"
-  "copy assignment operator|destructor}0">;
+  "definition of explicitly defaulted %select{default constructor|copy "
+  "constructor|copy assignment operator|destructor}0">;
 def err_redefinition_extern_inline : Error<
   "redefinition of a 'extern inline' function %0 is not supported in "
   "%select{C99 mode|C++}1">;
@@ -2866,6 +2873,8 @@ def err_objc_pointer_cxx_catch_fragile : Error<
   "exception model">;
 def err_objc_object_catch : Error<
   "can't catch an Objective C object by value">;
+def err_incomplete_type_objc_at_encode : Error<
+  "'@encode' of incomplete type %0">;
 
 def warn_setter_getter_impl_required : Warning<
   "property %0 requires method %1 to be defined - "
@@ -3625,8 +3634,40 @@ def warn_explicit_conversion_functions : Warning<
 // C++0x defaulted functions
 def err_defaulted_default_ctor_params : Error<
   "an explicitly-defaulted default constructor must have no parameters">;
+def err_defaulted_copy_ctor_params : Error<
+  "an explicitly-defaulted copy constructor must have exactly one parameter">;
+def err_defaulted_copy_ctor_volatile_param : Error<
+  "the parameter for an explicitly-defaulted copy constructor may not be "
+  "volatile">;
+def err_defaulted_copy_ctor_const_param : Error<
+  "the parameter for this explicitly-defaulted copy constructor is const, but "
+  "a member or base requires it to be non-const">;
+def err_defaulted_copy_assign_params : Error<
+  "an explicitly-defaulted copy assignment operator must have exactly one "
+  "parameter">;
+def err_defaulted_copy_assign_return_type : Error<
+  "an explicitly-defaulted copy assignment operator must return an unqualified "
+  "lvalue reference to its class type">;
+def err_defaulted_copy_assign_not_ref : Error<
+  "the parameter for an explicitly-defaulted copy assignment operator must be an "
+  "lvalue reference type">;
+def err_defaulted_copy_assign_volatile_param : Error<
+  "the parameter for an explicitly-defaulted copy assignment operator may not "
+  "be volatile">;
+def err_defaulted_copy_assign_const_param : Error<
+  "the parameter for this explicitly-defaulted copy assignment operator is "
+  "const, but a member or base requires it to be non-const">;
+def err_defaulted_copy_assign_quals : Error<
+  "an explicitly-defaulted copy assignment operator may not have 'const' "
+  "or 'volatile' qualifiers">;
 def err_incorrect_defaulted_exception_spec : Error<
-  "exception specification of explicitly defaulted function is incorrect">;
+  "exception specification of explicitly defaulted %select{default constructor|"
+  "copy constructor|copy assignment operator|destructor}0 does not match the "
+  "calculated one">;
+def err_out_of_line_default_deletes : Error<
+  "defaulting this %select{default constructor|copy constructor|copy "
+  "assignment operator|destructor}0 would delete it after its first "
+  "declaration">;
 
 def warn_array_index_precedes_bounds : Warning<
   "array index of '%0' indexes before the beginning of the array">,

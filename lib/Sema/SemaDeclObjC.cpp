@@ -272,23 +272,27 @@ Decl *Sema::ActOnCompatiblityAlias(SourceLocation AtLoc,
   return AliasDecl;
 }
 
-void Sema::CheckForwardProtocolDeclarationForCircularDependency(
+bool Sema::CheckForwardProtocolDeclarationForCircularDependency(
   IdentifierInfo *PName,
   SourceLocation &Ploc, SourceLocation PrevLoc,
   const ObjCList<ObjCProtocolDecl> &PList) {
+  
+  bool res = false;
   for (ObjCList<ObjCProtocolDecl>::iterator I = PList.begin(),
        E = PList.end(); I != E; ++I) {
-
     if (ObjCProtocolDecl *PDecl = LookupProtocol((*I)->getIdentifier(),
                                                  Ploc)) {
       if (PDecl->getIdentifier() == PName) {
         Diag(Ploc, diag::err_protocol_has_circular_dependency);
         Diag(PrevLoc, diag::note_previous_definition);
+        res = true;
       }
-      CheckForwardProtocolDeclarationForCircularDependency(PName, Ploc,
-        PDecl->getLocation(), PDecl->getReferencedProtocols());
+      if (CheckForwardProtocolDeclarationForCircularDependency(PName, Ploc,
+            PDecl->getLocation(), PDecl->getReferencedProtocols()))
+        res = true;
     }
   }
+  return res;
 }
 
 Decl *
@@ -300,6 +304,7 @@ Sema::ActOnStartProtocolInterface(SourceLocation AtProtoInterfaceLoc,
                                   const SourceLocation *ProtoLocs,
                                   SourceLocation EndProtoLoc,
                                   AttributeList *AttrList) {
+  bool err = false;
   // FIXME: Deal with AttrList.
   assert(ProtocolName && "Missing protocol identifier");
   ObjCProtocolDecl *PDecl = LookupProtocol(ProtocolName, ProtocolLoc);
@@ -314,8 +319,8 @@ Sema::ActOnStartProtocolInterface(SourceLocation AtProtoInterfaceLoc,
     }
     ObjCList<ObjCProtocolDecl> PList;
     PList.set((ObjCProtocolDecl *const*)ProtoRefs, NumProtoRefs, Context);
-    CheckForwardProtocolDeclarationForCircularDependency(
-      ProtocolName, ProtocolLoc, PDecl->getLocation(), PList);
+    err = CheckForwardProtocolDeclarationForCircularDependency(
+            ProtocolName, ProtocolLoc, PDecl->getLocation(), PList);
 
     // Make sure the cached decl gets a valid start location.
     PDecl->setLocation(AtProtoInterfaceLoc);
@@ -331,7 +336,7 @@ Sema::ActOnStartProtocolInterface(SourceLocation AtProtoInterfaceLoc,
   }
   if (AttrList)
     ProcessDeclAttributeList(TUScope, PDecl, AttrList);
-  if (NumProtoRefs) {
+  if (!err && NumProtoRefs ) {
     /// Check then save referenced protocols.
     PDecl->setProtocolList((ObjCProtocolDecl**)ProtoRefs, NumProtoRefs,
                            ProtoLocs, Context);

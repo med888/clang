@@ -1518,7 +1518,6 @@ Sema::CXXSpecialMember Sema::getSpecialMember(const CXXMethodDecl *MD) {
   if (MD->isCopyAssignmentOperator())
     return Sema::CXXCopyAssignment;
 
-  llvm_unreachable("getSpecialMember on non-special member");
   return Sema::CXXInvalid;
 }
 
@@ -2533,7 +2532,12 @@ Decl *Sema::BuildAnonymousStructOrUnion(Scope *S, DeclSpec &DS,
           Invalid = true;
         }
 
-        if (CheckNontrivialField(FD))
+        // C++ [class.union]p1
+        //   An object of a class with a non-trivial constructor, a non-trivial
+        //   copy constructor, a non-trivial destructor, or a non-trivial copy
+        //   assignment operator cannot be a member of a union, nor can an
+        //   array of such objects.
+        if (!getLangOptions().CPlusPlus0x && CheckNontrivialField(FD))
           Invalid = true;
       } else if ((*Mem)->isImplicit()) {
         // Any implicit members are fine.
@@ -2860,7 +2864,8 @@ static bool RebuildDeclaratorInCurrentInstantiation(Sema &S, Declarator &D,
   switch (DS.getTypeSpecType()) {
   case DeclSpec::TST_typename:
   case DeclSpec::TST_typeofType:
-  case DeclSpec::TST_decltype: {
+  case DeclSpec::TST_decltype:
+  case DeclSpec::TST_underlying_type: {
     // Grab the type from the parser.
     TypeSourceInfo *TSI = 0;
     QualType T = S.GetTypeFromParser(DS.getRepAsType(), &TSI);
@@ -2914,8 +2919,10 @@ static bool RebuildDeclaratorInCurrentInstantiation(Sema &S, Declarator &D,
   return false;
 }
 
-Decl *Sema::ActOnDeclarator(Scope *S, Declarator &D) {
-  return HandleDeclarator(S, D, MultiTemplateParamsArg(*this), false);
+Decl *Sema::ActOnDeclarator(Scope *S, Declarator &D,
+                            bool IsFunctionDefinition) {
+  return HandleDeclarator(S, D, MultiTemplateParamsArg(*this),
+                          IsFunctionDefinition);
 }
 
 /// DiagnoseClassNameShadow - Implement C++ [class.mem]p13:
@@ -2940,8 +2947,7 @@ bool Sema::DiagnoseClassNameShadow(DeclContext *DC,
   
 Decl *Sema::HandleDeclarator(Scope *S, Declarator &D,
                              MultiTemplateParamsArg TemplateParamLists,
-                             bool IsFunctionDefinition,
-                             SourceLocation DefaultLoc) {
+                             bool IsFunctionDefinition) {
   // TODO: consider using NameInfo for diagnostic.
   DeclarationNameInfo NameInfo = GetNameForDeclarator(D);
   DeclarationName Name = NameInfo.getName();
@@ -3142,9 +3148,6 @@ Decl *Sema::HandleDeclarator(Scope *S, Declarator &D,
 
   bool Redeclaration = false;
   if (D.getDeclSpec().getStorageClassSpec() == DeclSpec::SCS_typedef) {
-    if (DefaultLoc.isValid())
-      Diag(DefaultLoc, diag::err_default_special_members);
-
     if (TemplateParamLists.size()) {
       Diag(D.getIdentifierLoc(), diag::err_template_typedef);
       return 0;
@@ -3154,10 +3157,8 @@ Decl *Sema::HandleDeclarator(Scope *S, Declarator &D,
   } else if (R->isFunctionType()) {
     New = ActOnFunctionDeclarator(S, D, DC, R, TInfo, Previous,
                                   move(TemplateParamLists),
-                                  IsFunctionDefinition, Redeclaration,
-                                  DefaultLoc);
+                                  IsFunctionDefinition, Redeclaration);
   } else {
-    assert(!DefaultLoc.isValid() && "We should have caught this in a caller");
     New = ActOnVariableDeclarator(S, D, DC, R, TInfo, Previous,
                                   move(TemplateParamLists),
                                   Redeclaration);
@@ -3560,7 +3561,8 @@ Sema::ActOnVariableDeclarator(Scope *S, Declarator &D, DeclContext *DC,
     bool Invalid = false;
     if (TemplateParameterList *TemplateParams
         = MatchTemplateParametersToScopeSpecifier(
-                                                  D.getDeclSpec().getSourceRange().getBegin(),
+                                  D.getDeclSpec().getSourceRange().getBegin(),
+                                                  D.getIdentifierLoc(),
                                                   D.getCXXScopeSpec(),
                                                   TemplateParamLists.get(),
                                                   TemplateParamLists.size(),
@@ -3582,7 +3584,6 @@ Sema::ActOnVariableDeclarator(Scope *S, Declarator &D, DeclContext *DC,
           << II
           << SourceRange(TemplateParams->getTemplateLoc(),
                          TemplateParams->getRAngleLoc());
-        isExplicitSpecialization = true;
       }
     }
 
@@ -4029,8 +4030,7 @@ Sema::ActOnFunctionDeclarator(Scope* S, Declarator& D, DeclContext* DC,
                               QualType R, TypeSourceInfo *TInfo,
                               LookupResult &Previous,
                               MultiTemplateParamsArg TemplateParamLists,
-                              bool IsFunctionDefinition, bool &Redeclaration,
-                              SourceLocation DefaultLoc) {
+                              bool IsFunctionDefinition, bool &Redeclaration) {
   assert(R.getTypePtr()->isFunctionType());
 
   // TODO: consider using NameInfo for diagnostic.
@@ -4087,8 +4087,6 @@ Sema::ActOnFunctionDeclarator(Scope* S, Declarator& D, DeclContext* DC,
   bool isFunctionTemplateSpecialization = false;
 
   if (!getLangOptions().CPlusPlus) {
-    assert(!DefaultLoc.isValid() && "Defaulted functions are a C++ feature");
-
     // Determine whether the function was written with a
     // prototype. This true when:
     //   - there is a prototype in the declarator, or
@@ -4146,14 +4144,25 @@ Sema::ActOnFunctionDeclarator(Scope* S, Declarator& D, DeclContext* DC,
       // This is a C++ destructor declaration.
       if (DC->isRecord()) {
         R = CheckDestructorDeclarator(D, R, SC);
+        CXXRecordDecl *Record = cast<CXXRecordDecl>(DC);
 
-        NewFD = CXXDestructorDecl::Create(Context,
-                                          cast<CXXRecordDecl>(DC),
+        CXXDestructorDecl *NewDD = CXXDestructorDecl::Create(Context, Record,
                                           D.getSourceRange().getBegin(),
                                           NameInfo, R, TInfo,
                                           isInline,
                                           /*isImplicitlyDeclared=*/false);
+        NewFD = NewDD;
         isVirtualOkay = true;
+
+        // If the class is complete, then we now create the implicit exception
+        // specification. If the class is incomplete or dependent, we can't do
+        // it yet.
+        if (getLangOptions().CPlusPlus0x && !Record->isDependentType() &&
+            Record->getDefinition() && !Record->isBeingDefined() &&
+            R->getAs<FunctionProtoType>()->getExceptionSpecType() == EST_None) {
+          AdjustDestructorExceptionSpec(Record, NewDD);
+        }
+
       } else {
         Diag(D.getIdentifierLoc(), diag::err_destructor_not_member);
 
@@ -4220,9 +4229,6 @@ Sema::ActOnFunctionDeclarator(Scope* S, Declarator& D, DeclContext* DC,
 
       isVirtualOkay = !isStatic;
     } else {
-      if (DefaultLoc.isValid())
-        Diag(DefaultLoc, diag::err_default_special_members);
-
       // Determine whether the function was written with a
       // prototype. This true when:
       //   - we're in C++ (where every function has a prototype),
@@ -4255,6 +4261,7 @@ Sema::ActOnFunctionDeclarator(Scope* S, Declarator& D, DeclContext* DC,
     if (TemplateParameterList *TemplateParams
           = MatchTemplateParametersToScopeSpecifier(
                                   D.getDeclSpec().getSourceRange().getBegin(),
+                                  D.getIdentifierLoc(),
                                   D.getCXXScopeSpec(),
                                   TemplateParamLists.get(),
                                   TemplateParamLists.size(),
@@ -4579,7 +4586,7 @@ Sema::ActOnFunctionDeclarator(Scope* S, Declarator& D, DeclContext* DC,
         NewFD->setInvalidDecl();
     } else if (isFunctionTemplateSpecialization) {
       if (CurContext->isDependentContext() && CurContext->isRecord() 
-          && !isFriend) {
+          && !isFriend && !getLangOptions().Microsoft) {
         Diag(NewFD->getLocation(), diag::err_function_specialization_in_class)
           << NewFD->getDeclName();
         NewFD->setInvalidDecl();
@@ -4692,7 +4699,7 @@ Sema::ActOnFunctionDeclarator(Scope* S, Declarator& D, DeclContext* DC,
 
     } else if (!IsFunctionDefinition && D.getCXXScopeSpec().isSet() &&
                !isFriend && !isFunctionTemplateSpecialization &&
-               !isExplicitSpecialization && !DefaultLoc.isValid()) {
+               !isExplicitSpecialization) {
       // An out-of-line member function declaration must also be a
       // definition (C++ [dcl.meaning]p1).
       // Note that this is not the case for explicit specializations of
@@ -4703,8 +4710,8 @@ Sema::ActOnFunctionDeclarator(Scope* S, Declarator& D, DeclContext* DC,
         << D.getCXXScopeSpec().getRange();
     }
   }
-  
-  
+ 
+ 
   // Handle attributes. We need to have merged decls when handling attributes
   // (for example to check for conflicts, etc).
   // FIXME: This needs to happen before we merge declarations. Then,
@@ -4776,36 +4783,6 @@ Sema::ActOnFunctionDeclarator(Scope* S, Declarator& D, DeclContext* DC,
           Context.setcudaConfigureCallDecl(NewFD);
         }
       }
-
-  // Check explicitly defaulted methods
-  // FIXME: This could be made better through CXXSpecialMember if it did
-  // default constructors (which it should rather than any constructor).
-  if (NewFD && DefaultLoc.isValid() && getLangOptions().CPlusPlus) {
-    if (CXXMethodDecl *MD = dyn_cast<CXXMethodDecl>(NewFD)) {
-      if (CXXConstructorDecl *CD = dyn_cast<CXXConstructorDecl>(MD)) {
-        if (CD->isDefaultConstructor() || CD->isCopyOrMoveConstructor()) {
-          CD->setDefaulted();
-          CD->setExplicitlyDefaulted();
-          if (CD != CD->getCanonicalDecl() && CD->isDefaultConstructor())
-            CheckExplicitlyDefaultedDefaultConstructor(CD);
-          // FIXME: Do copy/move ctors here.
-        } else {
-          Diag(DefaultLoc, diag::err_default_special_members);
-        }
-      } else if (CXXDestructorDecl *DD = dyn_cast<CXXDestructorDecl>(MD)) {
-        DD->setDefaulted();
-        DD->setExplicitlyDefaulted();
-        // FIXME: Add a checking method
-      } else if (MD->isCopyAssignmentOperator() /* ||
-                 MD->isMoveAssignmentOperator() */) {
-        MD->setDefaulted();
-        MD->setExplicitlyDefaulted();
-        // FIXME: Add a checking method
-      } else {
-        Diag(DefaultLoc, diag::err_default_special_members);
-      }
-    }
-  }
 
   return NewFD;
 }
@@ -5641,7 +5618,7 @@ void Sema::ActOnUninitializedDecl(Decl *RealDecl,
 
     const RecordType *Record
       = Context.getBaseElementType(Type)->getAs<RecordType>();
-    if (Record && getLangOptions().CPlusPlus &&
+    if (Record && getLangOptions().CPlusPlus && !getLangOptions().CPlusPlus0x &&
         cast<CXXRecordDecl>(Record->getDecl())->isPOD()) {
       // C++03 [dcl.init]p9:
       //   If no initializer is specified for an object, and the
@@ -5654,12 +5631,27 @@ void Sema::ActOnUninitializedDecl(Decl *RealDecl,
       //   any, have an indeterminate initial value); if the object
       //   or any of its subobjects are of const-qualified type, the
       //   program is ill-formed.
+      // C++0x [dcl.init]p11:
+      //   If no initializer is specified for an object, the object is
+      //   default-initialized; [...].
     } else {
       // Check for jumps past the implicit initializer.  C++0x
       // clarifies that this applies to a "variable with automatic
       // storage duration", not a "local variable".
-      if (getLangOptions().CPlusPlus && Var->hasLocalStorage())
-        getCurFunction()->setHasBranchProtectedScope();
+      // C++0x [stmt.dcl]p3
+      //   A program that jumps from a point where a variable with automatic
+      //   storage duration is not ins cope to a point where it is in scope is
+      //   ill-formed unless the variable has scalar type, class type with a
+      //   trivial defautl constructor and a trivial destructor, a cv-qualified
+      //   version of one of these types, or an array of one of the preceding
+      //   types and is declared without an initializer.
+      if (getLangOptions().CPlusPlus && Var->hasLocalStorage() && Record) {
+        CXXRecordDecl *CXXRecord = cast<CXXRecordDecl>(Record->getDecl());
+        if (!getLangOptions().CPlusPlus0x ||
+            !CXXRecord->hasTrivialDefaultConstructor() ||
+            !CXXRecord->hasTrivialDestructor())
+          getCurFunction()->setHasBranchProtectedScope();
+      }
 
       InitializedEntity Entity = InitializedEntity::InitializeVariable(Var);
       InitializationKind Kind
@@ -6307,6 +6299,11 @@ Decl *Sema::ActOnFinishFunctionBody(Decl *dcl, Stmt *Body,
       WP.disableCheckFallThrough();
     }
 
+    // MSVC permits the use of pure specifier (=0) on function definition,
+    // defined at class scope, warn about this non standard construct.
+    if (getLangOptions().Microsoft && FD->isPure())
+      Diag(FD->getLocation(), diag::warn_pure_function_definition);
+
     if (!FD->isInvalidDecl()) {
       DiagnoseUnusedParameters(FD->param_begin(), FD->param_end());
       DiagnoseSizeOfParametersAndReturnValue(FD->param_begin(), FD->param_end(),
@@ -6653,7 +6650,7 @@ Decl *Sema::ActOnTag(Scope *S, unsigned TagSpec, TagUseKind TUK,
   if (TemplateParameterLists.size() > 0 ||
       (SS.isNotEmpty() && TUK != TUK_Reference)) {
     if (TemplateParameterList *TemplateParams
-          = MatchTemplateParametersToScopeSpecifier(KWLoc, SS,
+          = MatchTemplateParametersToScopeSpecifier(KWLoc, NameLoc, SS,
                                                 TemplateParameterLists.get(),
                                                 TemplateParameterLists.size(),
                                                     TUK == TUK_Friend,
@@ -7632,8 +7629,7 @@ FieldDecl *Sema::CheckFieldDecl(DeclarationName Name, QualType T,
           // destructor, or a non-trivial copy assignment operator
           // cannot be a member of a union, nor can an array of such
           // objects.
-          // TODO: C++0x alters this restriction significantly.
-          if (CheckNontrivialField(NewFD))
+          if (!getLangOptions().CPlusPlus0x && CheckNontrivialField(NewFD))
             NewFD->setInvalidDecl();
         }
       }
@@ -8144,6 +8140,11 @@ void Sema::ActOnFields(Scope* S,
           Convs->setAccess(I, (*I)->getAccess());
         
         if (!CXXRecord->isDependentType()) {
+          // Adjust user-defined destructor exception spec.
+          if (getLangOptions().CPlusPlus0x &&
+              CXXRecord->hasUserDeclaredDestructor())
+            AdjustDestructorExceptionSpec(CXXRecord,CXXRecord->getDestructor());
+
           // Add any implicitly-declared members to this class.
           AddImplicitlyDeclaredMembersToClass(CXXRecord);
 
@@ -8192,6 +8193,19 @@ void Sema::ActOnFields(Scope* S,
     
     if (!Completed)
       Record->completeDefinition();
+
+    // Now that the record is complete, do any delayed exception spec checks
+    // we were missing.
+    if (!DelayedDestructorExceptionSpecChecks.empty()) {
+      const CXXDestructorDecl *Dtor =
+              DelayedDestructorExceptionSpecChecks.back().first;
+      if (Dtor->getParent() == Record) {
+        CheckOverridingFunctionExceptionSpec(Dtor,
+            DelayedDestructorExceptionSpecChecks.back().second);
+        DelayedDestructorExceptionSpecChecks.pop_back();
+      }
+    }
+
   } else {
     ObjCIvarDecl **ClsFields =
       reinterpret_cast<ObjCIvarDecl**>(RecFields.data());

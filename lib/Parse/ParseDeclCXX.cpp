@@ -572,6 +572,42 @@ void Parser::ParseDecltypeSpecifier(DeclSpec &DS) {
     Diag(StartLoc, DiagID) << PrevSpec;
 }
 
+void Parser::ParseUnderlyingTypeSpecifier(DeclSpec &DS) {
+  assert(Tok.is(tok::kw___underlying_type) &&
+         "Not an underlying type specifier");
+
+  SourceLocation StartLoc = ConsumeToken();
+  SourceLocation LParenLoc = Tok.getLocation();
+
+  if (ExpectAndConsume(tok::l_paren, diag::err_expected_lparen_after,
+                       "__underlying_type")) {
+    SkipUntil(tok::r_paren);
+    return;
+  }
+
+  TypeResult Result = ParseTypeName();
+  if (Result.isInvalid()) {
+    SkipUntil(tok::r_paren);
+    return;
+  }
+
+  // Match the ')'
+  SourceLocation RParenLoc;
+  if (Tok.is(tok::r_paren))
+    RParenLoc = ConsumeParen();
+  else
+    MatchRHSPunctuation(tok::r_paren, LParenLoc);
+
+  if (RParenLoc.isInvalid())
+    return;
+
+  const char *PrevSpec = 0;
+  unsigned DiagID;
+  if (DS.SetTypeSpecType(DeclSpec::TST_underlying_type, StartLoc, PrevSpec,
+                         DiagID, Result.release()))
+    Diag(StartLoc, DiagID) << PrevSpec;
+}
+
 /// ParseClassName - Parse a C++ class-name, which names a class. Note
 /// that we only check that the result names a type; semantic analysis
 /// will need to verify that the type names a class. The result is
@@ -1581,6 +1617,7 @@ void Parser::ParseCXXClassMemberDeclaration(AccessSpecifier AS,
 
   ParsingDeclarator DeclaratorInfo(*this, DS, Declarator::MemberContext);
   VirtSpecifiers VS;
+  ExprResult Init;
 
   if (Tok.isNot(tok::colon)) {
     // Don't parse FOO:BAR as if it were a typo for FOO::BAR.
@@ -1602,10 +1639,32 @@ void Parser::ParseCXXClassMemberDeclaration(AccessSpecifier AS,
     // If attributes exist after the declarator, but before an '{', parse them.
     MaybeParseGNUAttributes(DeclaratorInfo);
 
+    // MSVC permits pure specifier on inline functions declared at class scope.
+    // Hence check for =0 before checking for function definition.
+    if (getLang().Microsoft && Tok.is(tok::equal) &&
+        DeclaratorInfo.isFunctionDeclarator() && 
+        NextToken().is(tok::numeric_constant)) {
+      ConsumeToken();
+      Init = ParseInitializer();
+      if (Init.isInvalid())
+        SkipUntil(tok::comma, true, true);
+    }
+
+    bool IsDefinition = false;
     // function-definition:
-    if (Tok.is(tok::l_brace)
-        || (DeclaratorInfo.isFunctionDeclarator() &&
-            (Tok.is(tok::colon) || Tok.is(tok::kw_try)))) {
+    if (Tok.is(tok::l_brace)) {
+      IsDefinition = true;
+    } else if (DeclaratorInfo.isFunctionDeclarator()) {
+      if (Tok.is(tok::colon) || Tok.is(tok::kw_try)) {
+        IsDefinition = true;
+      } else if (Tok.is(tok::equal)) {
+        const Token &KW = NextToken();
+        if (KW.is(tok::kw_default) || KW.is(tok::kw_delete))
+          IsDefinition = true;
+      }
+    }
+
+    if (IsDefinition) {
       if (!DeclaratorInfo.isFunctionDeclarator()) {
         Diag(Tok, diag::err_func_def_no_params);
         ConsumeBrace();
@@ -1631,10 +1690,12 @@ void Parser::ParseCXXClassMemberDeclaration(AccessSpecifier AS,
         return;
       }
 
-      ParseCXXInlineMethodDef(AS, DeclaratorInfo, TemplateInfo, VS);
-      // Consume the optional ';'
-      if (Tok.is(tok::semi))
+      ParseCXXInlineMethodDef(AS, DeclaratorInfo, TemplateInfo, VS, Init);
+
+      // Consume the ';' - it's optional unless we have a delete or default
+      if (Tok.is(tok::semi)) {
         ConsumeToken();
+      }
 
       return;
     }
@@ -1646,9 +1707,6 @@ void Parser::ParseCXXClassMemberDeclaration(AccessSpecifier AS,
 
   llvm::SmallVector<Decl *, 8> DeclsInGroup;
   ExprResult BitfieldSize;
-  ExprResult Init;
-  bool Deleted = false;
-  SourceLocation DefaultLoc;
 
   while (1) {
     // member-declarator:
@@ -1676,14 +1734,17 @@ void Parser::ParseCXXClassMemberDeclaration(AccessSpecifier AS,
     if (Tok.is(tok::equal)) {
       ConsumeToken();
       if (Tok.is(tok::kw_delete)) {
-        if (!getLang().CPlusPlus0x)
-          Diag(Tok, diag::warn_deleted_function_accepted_as_extension);
-        ConsumeToken();
-        Deleted = true;
+        if (DeclaratorInfo.isFunctionDeclarator())
+          Diag(ConsumeToken(), diag::err_default_delete_in_multiple_declaration)
+            << 1 /* delete */;
+        else
+          Diag(ConsumeToken(), diag::err_deleted_non_function);
       } else if (Tok.is(tok::kw_default)) {
-        if (!getLang().CPlusPlus0x)
-          Diag(Tok, diag::warn_defaulted_function_accepted_as_extension);
-        DefaultLoc = ConsumeToken();
+        if (DeclaratorInfo.isFunctionDeclarator())
+          Diag(Tok, diag::err_default_delete_in_multiple_declaration)
+            << 1 /* delete */;
+        else
+          Diag(ConsumeToken(), diag::err_default_special_members);
       } else {
         Init = ParseInitializer();
         if (Init.isInvalid())
@@ -1711,9 +1772,6 @@ void Parser::ParseCXXClassMemberDeclaration(AccessSpecifier AS,
 
     Decl *ThisDecl = 0;
     if (DS.isFriendSpecified()) {
-      if (DefaultLoc.isValid())
-        Diag(DefaultLoc, diag::err_default_special_members);
-
       // TODO: handle initializers, bitfields, 'delete'
       ThisDecl = Actions.ActOnFriendFunctionDecl(getCurScope(), DeclaratorInfo,
                                                  /*IsDefinition*/ false,
@@ -1723,9 +1781,7 @@ void Parser::ParseCXXClassMemberDeclaration(AccessSpecifier AS,
                                                   DeclaratorInfo,
                                                   move(TemplateParams),
                                                   BitfieldSize.release(),
-                                                  VS, Init.release(),
-                                                  /*IsDefinition*/Deleted,
-                                                  Deleted, DefaultLoc);
+                                                  VS, Init.release(), false);
     }
     if (ThisDecl)
       DeclsInGroup.push_back(ThisDecl);
@@ -1751,8 +1807,6 @@ void Parser::ParseCXXClassMemberDeclaration(AccessSpecifier AS,
     VS.clear();
     BitfieldSize = 0;
     Init = 0;
-    Deleted = false;
-    DefaultLoc = SourceLocation();
 
     // Attributes are only allowed on the second declarator.
     MaybeParseGNUAttributes(DeclaratorInfo);

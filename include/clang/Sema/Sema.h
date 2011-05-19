@@ -316,6 +316,13 @@ public:
   /// cycle detection at the end of the TU.
   llvm::SmallVector<CXXConstructorDecl*, 4> DelegatingCtorDecls;
 
+  /// \brief All the overriding destructors seen during a class definition
+  /// (there could be multiple due to nested classes) that had their exception
+  /// spec checks delayed, plus the overridden destructor.
+  llvm::SmallVector<std::pair<const CXXDestructorDecl*,
+                              const CXXDestructorDecl*>, 2>
+      DelayedDestructorExceptionSpecChecks;
+
   /// \brief Callback to the parser to parse templated functions when needed.
   typedef void LateTemplateParserCB(void *P, const FunctionDecl *FD);
   LateTemplateParserCB *LateTemplateParser;
@@ -931,12 +938,12 @@ public:
                                   SourceLocation NameLoc,
                                   const Token &NextToken);
   
-  Decl *ActOnDeclarator(Scope *S, Declarator &D);
+  Decl *ActOnDeclarator(Scope *S, Declarator &D,
+                        bool IsFunctionDefintion = false);
 
   Decl *HandleDeclarator(Scope *S, Declarator &D,
                          MultiTemplateParamsArg TemplateParameterLists,
-                         bool IsFunctionDefinition,
-                         SourceLocation DefaultLoc = SourceLocation());
+                         bool IsFunctionDefinition);
   void RegisterLocallyScopedExternCDecl(NamedDecl *ND,
                                         const LookupResult &Previous,
                                         Scope *S);
@@ -964,8 +971,7 @@ public:
                                      LookupResult &Previous,
                                      MultiTemplateParamsArg TemplateParamLists,
                                      bool IsFunctionDefinition,
-                                     bool &Redeclaration,
-                                   SourceLocation DefaultLoc = SourceLocation());
+                                     bool &Redeclaration);
   bool AddOverriddenMethods(CXXRecordDecl *DC, CXXMethodDecl *MD);
   void DiagnoseHiddenVirtualMethods(CXXRecordDecl *DC, CXXMethodDecl *MD);
   void CheckFunctionDeclaration(Scope *S,
@@ -997,6 +1003,7 @@ public:
   void ActOnInitializerError(Decl *Dcl);
   void ActOnCXXForRangeDecl(Decl *D);
   void SetDeclDeleted(Decl *dcl, SourceLocation DelLoc);
+  void SetDeclDefaulted(Decl *dcl, SourceLocation DefaultLoc);
   void FinalizeDeclaration(Decl *D);
   DeclGroupPtrTy FinalizeDeclaratorGroup(Scope *S, const DeclSpec &DS,
                                          Decl **Group,
@@ -1293,6 +1300,8 @@ public:
                                              QualType ResultType,
                                              Expr *Value);
   
+  bool CanPerformCopyInitialization(const InitializedEntity &Entity,
+                                    ExprResult Init);
   ExprResult PerformCopyInitialization(const InitializedEntity &Entity,
                                        SourceLocation EqualLoc,
                                        ExprResult Init);
@@ -2529,7 +2538,8 @@ public:
   /// \brief Helper class that collects exception specifications for 
   /// implicitly-declared special member functions.
   class ImplicitExceptionSpecification {
-    ASTContext &Context;
+    // Pointer to allow copying
+    ASTContext *Context;
     // We order exception specifications thus:
     // noexcept is the most restrictive, but is only used in C++0x.
     // throw() comes next.
@@ -2547,7 +2557,7 @@ public:
 
   public:
     explicit ImplicitExceptionSpecification(ASTContext &Context) 
-      : Context(Context), ComputedEST(EST_BasicNoexcept) {
+      : Context(&Context), ComputedEST(EST_BasicNoexcept) {
       if (!Context.getLangOptions().CPlusPlus0x)
         ComputedEST = EST_DynamicNone;
     }
@@ -2578,9 +2588,41 @@ public:
   };
 
   /// \brief Determine what sort of exception specification a defaulted
-  /// constructor of a class will have.
+  /// copy constructor of a class will have.
   ImplicitExceptionSpecification
   ComputeDefaultedDefaultCtorExceptionSpec(CXXRecordDecl *ClassDecl);
+
+  /// \brief Determine what sort of exception specification a defaulted
+  /// default constructor of a class will have, and whether the parameter
+  /// will be const.
+  std::pair<ImplicitExceptionSpecification, bool>
+  ComputeDefaultedCopyCtorExceptionSpecAndConst(CXXRecordDecl *ClassDecl);
+
+  /// \brief Determine what sort of exception specification a defautled
+  /// copy assignment operator of a class will have, and whether the
+  /// parameter will be const.
+  std::pair<ImplicitExceptionSpecification, bool>
+  ComputeDefaultedCopyAssignmentExceptionSpecAndConst(CXXRecordDecl *ClassDecl);
+
+  /// \brief Determine what sort of exception specification a defaulted
+  /// destructor of a class will have.
+  ImplicitExceptionSpecification
+  ComputeDefaultedDtorExceptionSpec(CXXRecordDecl *ClassDecl);
+
+  /// \brief Determine if a defaulted default constructor ought to be
+  /// deleted.
+  bool ShouldDeleteDefaultConstructor(CXXConstructorDecl *CD);
+
+  /// \brief Determine if a defaulted copy constructor ought to be
+  /// deleted.
+  bool ShouldDeleteCopyConstructor(CXXConstructorDecl *CD);
+
+  /// \brief Determine if a defaulted copy assignment operator ought to be
+  /// deleted.
+  bool ShouldDeleteCopyAssignmentOperator(CXXMethodDecl *MD);
+
+  /// \brief Determine if a defaulted destructor ought to be deleted.
+  bool ShouldDeleteDestructor(CXXDestructorDecl *DD);
 
   /// \brief Declare the implicit default constructor for the given class.
   ///
@@ -2609,6 +2651,13 @@ public:
   void DefineImplicitDestructor(SourceLocation CurrentLocation,
                                 CXXDestructorDecl *Destructor);
 
+  /// \brief Build an exception spec for destructors that don't have one.
+  ///
+  /// C++11 says that user-defined destructors with no exception spec get one
+  /// that looks as if the destructor was implicitly declared.
+  void AdjustDestructorExceptionSpec(CXXRecordDecl *ClassDecl,
+                                     CXXDestructorDecl *Destructor);
+
   /// \brief Declare all inherited constructors for the given class.
   ///
   /// \param ClassDecl The class declaration into which the inherited
@@ -2629,8 +2678,7 @@ public:
   /// DefineImplicitCopyConstructor - Checks for feasibility of
   /// defining this constructor as the copy constructor.
   void DefineImplicitCopyConstructor(SourceLocation CurrentLocation,
-                                     CXXConstructorDecl *Constructor,
-                                     unsigned TypeQuals);
+                                     CXXConstructorDecl *Constructor);
 
   /// \brief Declare the implicit copy assignment operator for the given class.
   ///
@@ -2783,14 +2831,16 @@ public:
   bool FindAllocationOverload(SourceLocation StartLoc, SourceRange Range,
                               DeclarationName Name, Expr** Args,
                               unsigned NumArgs, DeclContext *Ctx,
-                              bool AllowMissing, FunctionDecl *&Operator);
+                              bool AllowMissing, FunctionDecl *&Operator,
+                              bool Diagnose = true);
   void DeclareGlobalNewDelete();
   void DeclareGlobalAllocationFunction(DeclarationName Name, QualType Return,
                                        QualType Argument,
                                        bool addMallocAttr = false);
 
   bool FindDeallocationFunction(SourceLocation StartLoc, CXXRecordDecl *RD,
-                                DeclarationName Name, FunctionDecl* &Operator);
+                                DeclarationName Name, FunctionDecl* &Operator,
+                                bool Diagnose = true);
 
   /// ActOnCXXDelete - Parsed a C++ 'delete' expression
   ExprResult ActOnCXXDelete(SourceLocation StartLoc,
@@ -3069,7 +3119,7 @@ public:
                                     Expr **Strings,
                                     unsigned NumStrings);
 
-  Expr *BuildObjCEncodeExpression(SourceLocation AtLoc,
+  ExprResult BuildObjCEncodeExpression(SourceLocation AtLoc,
                                   TypeSourceInfo *EncodedTypeInfo,
                                   SourceLocation RParenLoc);
   ExprResult BuildCXXMemberCallExpr(Expr *Exp, NamedDecl *FoundDecl,
@@ -3122,9 +3172,7 @@ public:
                                  Declarator &D,
                                  MultiTemplateParamsArg TemplateParameterLists,
                                  Expr *BitfieldWidth, const VirtSpecifiers &VS,
-                                 Expr *Init, bool IsDefinition,
-                                 bool Deleted = false,
-                                 SourceLocation DefaultLoc = SourceLocation());
+                                 Expr *Init, bool IsDefinition);
 
   MemInitResult ActOnMemInitializer(Decl *ConstructorD,
                                     Scope *S,
@@ -3257,6 +3305,9 @@ public:
 
   void CheckExplicitlyDefaultedMethods(CXXRecordDecl *Record);
   void CheckExplicitlyDefaultedDefaultConstructor(CXXConstructorDecl *Ctor);
+  void CheckExplicitlyDefaultedCopyConstructor(CXXConstructorDecl *Ctor);
+  void CheckExplicitlyDefaultedCopyAssignment(CXXMethodDecl *Method);
+  void CheckExplicitlyDefaultedDestructor(CXXDestructorDecl *Dtor);
 
   //===--------------------------------------------------------------------===//
   // C++ Derived Classes
@@ -3345,7 +3396,8 @@ public:
   AccessResult CheckAllocationAccess(SourceLocation OperatorLoc,
                                      SourceRange PlacementRange,
                                      CXXRecordDecl *NamingClass,
-                                     DeclAccessPair FoundDecl);
+                                     DeclAccessPair FoundDecl,
+                                     bool Diagnose = true);
   AccessResult CheckConstructorAccess(SourceLocation Loc,
                                       CXXConstructorDecl *D,
                                       const InitializedEntity &Entity,
@@ -3491,6 +3543,7 @@ public:
                                   TemplateParamListContext TPC);
   TemplateParameterList *
   MatchTemplateParametersToScopeSpecifier(SourceLocation DeclStartLoc,
+                                          SourceLocation DeclLoc,
                                           const CXXScopeSpec &SS,
                                           TemplateParameterList **ParamLists,
                                           unsigned NumParamLists,
@@ -4733,7 +4786,7 @@ public:
                     IdentifierInfo *AliasName,  SourceLocation AliasLocation,
                     IdentifierInfo *ClassName, SourceLocation ClassLocation);
 
-  void CheckForwardProtocolDeclarationForCircularDependency(
+  bool CheckForwardProtocolDeclarationForCircularDependency(
     IdentifierInfo *PName,
     SourceLocation &PLoc, SourceLocation PrevLoc,
     const ObjCList<ObjCProtocolDecl> &PList);

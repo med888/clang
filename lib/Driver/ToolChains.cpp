@@ -1043,14 +1043,14 @@ Tool &FreeBSD::SelectTool(const Compilation &C, const JobAction &JA,
 
 /// NetBSD - NetBSD tool chain which can call as(1) and ld(1) directly.
 
-NetBSD::NetBSD(const HostInfo &Host, const llvm::Triple& Triple)
-  : Generic_ELF(Host, Triple) {
+NetBSD::NetBSD(const HostInfo &Host, const llvm::Triple& Triple,
+               const llvm::Triple& ToolTriple)
+  : Generic_ELF(Host, Triple), ToolTriple(ToolTriple) {
 
   // Determine if we are compiling 32-bit code on an x86_64 platform.
   bool Lib32 = false;
-  if (Triple.getArch() == llvm::Triple::x86 &&
-      llvm::Triple(getDriver().DefaultHostTriple).getArch() ==
-        llvm::Triple::x86_64)
+  if (ToolTriple.getArch() == llvm::Triple::x86_64 &&
+      Triple.getArch() == llvm::Triple::x86)
     Lib32 = true;
 
   if (getDriver().UseStdLib) {
@@ -1080,10 +1080,11 @@ Tool &NetBSD::SelectTool(const Compilation &C, const JobAction &JA,
       if (UseIntegratedAs)
         T = new tools::ClangAs(*this);
       else
-        T = new tools::netbsd::Assemble(*this);
+        T = new tools::netbsd::Assemble(*this, ToolTriple);
       break;
     case Action::LinkJobClass:
-      T = new tools::netbsd::Link(*this); break;
+      T = new tools::netbsd::Link(*this, ToolTriple);
+      break;
     default:
       T = &Generic_GCC::SelectTool(C, JA, Inputs);
     }
@@ -1379,7 +1380,8 @@ Linux::Linux(const HostInfo &Host, const llvm::Triple &Triple)
                                "4.5.2", "4.5.1", "4.5",
                                "4.4.5", "4.4.4", "4.4.3", "4.4",
                                "4.3.4", "4.3.3", "4.3.2", "4.3",
-                               "4.2.4", "4.2.3", "4.2.2", "4.2.1", "4.2"};
+                               "4.2.4", "4.2.3", "4.2.2", "4.2.1", "4.2",
+                               "4.1.1"};
   std::string Base = "";
   for (unsigned i = 0; i < sizeof(GccVersions)/sizeof(char*); ++i) {
     std::string Suffix = GccTriple + "/" + GccVersions[i];

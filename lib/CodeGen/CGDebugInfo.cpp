@@ -1241,9 +1241,13 @@ llvm::DIType CGDebugInfo::CreateType(const ObjCInterfaceType *Ty,
   uint64_t Size = CGM.getContext().getTypeSize(Ty);
   uint64_t Align = CGM.getContext().getTypeAlign(Ty);
 
+  unsigned Flags = 0;
+  if (ID->getImplementation())
+    Flags |= llvm::DIDescriptor::FlagObjcClassComplete;
+
   llvm::DIType RealDecl =
     DBuilder.createStructType(Unit, ID->getName(), DefUnit,
-                                  Line, Size, Align, 0,
+                                  Line, Size, Align, Flags,
                                   Elements, RuntimeLang);
 
   // Now that we have a real decl for the struct, replace anything using the
@@ -1654,6 +1658,9 @@ void CGDebugInfo::EmitFunctionStart(GlobalDecl GD, QualType FnType,
     if (const NamespaceDecl *NSDecl =
         dyn_cast_or_null<NamespaceDecl>(FD->getDeclContext()))
       FDContext = getOrCreateNameSpace(NSDecl);
+    else if (const RecordDecl *RDecl =
+             dyn_cast_or_null<RecordDecl>(FD->getDeclContext()))
+      FDContext = getContextDescriptor(cast<Decl>(RDecl->getDeclContext()));
 
     // Collect template parameters.
     TParamsArray = CollectFunctionTemplateParams(FD, Unit);

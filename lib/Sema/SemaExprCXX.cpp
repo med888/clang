@@ -951,8 +951,8 @@ Sema::BuildCXXNew(SourceLocation StartLoc, bool UseGlobal,
       }
     }
 
-    ArraySize = ImpCastExprToType(ArraySize, Context.getSizeType(),
-                      CK_IntegralCast).take();
+    // Note that we do *not* convert the argument in any way.  It can
+    // be signed, larger than size_t, whatever.
   }
 
   FunctionDecl *OperatorNew = 0;
@@ -1327,11 +1327,12 @@ bool Sema::FindAllocationFunctions(SourceLocation StartLoc, SourceRange Range,
 bool Sema::FindAllocationOverload(SourceLocation StartLoc, SourceRange Range,
                                   DeclarationName Name, Expr** Args,
                                   unsigned NumArgs, DeclContext *Ctx,
-                                  bool AllowMissing, FunctionDecl *&Operator) {
+                                  bool AllowMissing, FunctionDecl *&Operator,
+                                  bool Diagnose) {
   LookupResult R(*this, Name, StartLoc, LookupOrdinaryName);
   LookupQualifiedName(R, Ctx);
   if (R.empty()) {
-    if (AllowMissing)
+    if (AllowMissing || !Diagnose)
       return false;
     return Diag(StartLoc, diag::err_ovl_no_viable_function_in_call)
       << Name << Range;
@@ -1375,40 +1376,46 @@ bool Sema::FindAllocationOverload(SourceLocation StartLoc, SourceRange Range,
     // Watch out for variadic allocator function.
     unsigned NumArgsInFnDecl = FnDecl->getNumParams();
     for (unsigned i = 0; (i < NumArgs && i < NumArgsInFnDecl); ++i) {
+      InitializedEntity Entity = InitializedEntity::InitializeParameter(Context,
+                                                       FnDecl->getParamDecl(i));
+
+      if (!Diagnose && !CanPerformCopyInitialization(Entity, Owned(Args[i])))
+        return true;
+
       ExprResult Result
-        = PerformCopyInitialization(InitializedEntity::InitializeParameter(
-                                                       Context,
-                                                       FnDecl->getParamDecl(i)),
-                                    SourceLocation(),
-                                    Owned(Args[i]));
+        = PerformCopyInitialization(Entity, SourceLocation(), Owned(Args[i]));
       if (Result.isInvalid())
         return true;
 
       Args[i] = Result.takeAs<Expr>();
     }
     Operator = FnDecl;
-    CheckAllocationAccess(StartLoc, Range, R.getNamingClass(), Best->FoundDecl);
+    CheckAllocationAccess(StartLoc, Range, R.getNamingClass(), Best->FoundDecl,
+                          Diagnose);
     return false;
   }
 
   case OR_No_Viable_Function:
-    Diag(StartLoc, diag::err_ovl_no_viable_function_in_call)
-      << Name << Range;
+    if (Diagnose)
+      Diag(StartLoc, diag::err_ovl_no_viable_function_in_call)
+        << Name << Range;
     Candidates.NoteCandidates(*this, OCD_AllCandidates, Args, NumArgs);
     return true;
 
   case OR_Ambiguous:
-    Diag(StartLoc, diag::err_ovl_ambiguous_call)
-      << Name << Range;
+    if (Diagnose)
+      Diag(StartLoc, diag::err_ovl_ambiguous_call)
+        << Name << Range;
     Candidates.NoteCandidates(*this, OCD_ViableCandidates, Args, NumArgs);
     return true;
 
   case OR_Deleted: {
-    Diag(StartLoc, diag::err_ovl_deleted_call)
-      << Best->Function->isDeleted()
-      << Name 
-      << getDeletedOrUnavailableSuffix(Best->Function)
-      << Range;
+    if (Diagnose)
+      Diag(StartLoc, diag::err_ovl_deleted_call)
+        << Best->Function->isDeleted()
+        << Name 
+        << getDeletedOrUnavailableSuffix(Best->Function)
+        << Range;
     Candidates.NoteCandidates(*this, OCD_AllCandidates, Args, NumArgs);
     return true;
   }
@@ -1569,7 +1576,7 @@ void Sema::DeclareGlobalAllocationFunction(DeclarationName Name,
 
 bool Sema::FindDeallocationFunction(SourceLocation StartLoc, CXXRecordDecl *RD,
                                     DeclarationName Name,
-                                    FunctionDecl* &Operator) {
+                                    FunctionDecl* &Operator, bool Diagnose) {
   LookupResult Found(*this, Name, StartLoc, LookupOrdinaryName);
   // Try to find operator delete/operator delete[] in class scope.
   LookupQualifiedName(Found, RD);
@@ -1596,33 +1603,45 @@ bool Sema::FindDeallocationFunction(SourceLocation StartLoc, CXXRecordDecl *RD,
   // There's exactly one suitable operator;  pick it.
   if (Matches.size() == 1) {
     Operator = cast<CXXMethodDecl>(Matches[0]->getUnderlyingDecl());
+
+    if (Operator->isDeleted()) {
+      if (Diagnose) {
+        Diag(StartLoc, diag::err_deleted_function_use);
+        Diag(Operator->getLocation(), diag::note_unavailable_here) << true;
+      }
+      return true;
+    }
+
     CheckAllocationAccess(StartLoc, SourceRange(), Found.getNamingClass(),
-                          Matches[0]);
+                          Matches[0], Diagnose);
     return false;
 
   // We found multiple suitable operators;  complain about the ambiguity.
   } else if (!Matches.empty()) {
-    Diag(StartLoc, diag::err_ambiguous_suitable_delete_member_function_found)
-      << Name << RD;
+    if (Diagnose) {
+      Diag(StartLoc, diag::err_ambiguous_suitable_delete_member_function_found)
+        << Name << RD;
 
-    for (llvm::SmallVectorImpl<DeclAccessPair>::iterator
-           F = Matches.begin(), FEnd = Matches.end(); F != FEnd; ++F)
-      Diag((*F)->getUnderlyingDecl()->getLocation(),
-           diag::note_member_declared_here) << Name;
+      for (llvm::SmallVectorImpl<DeclAccessPair>::iterator
+             F = Matches.begin(), FEnd = Matches.end(); F != FEnd; ++F)
+        Diag((*F)->getUnderlyingDecl()->getLocation(),
+             diag::note_member_declared_here) << Name;
+    }
     return true;
   }
 
   // We did find operator delete/operator delete[] declarations, but
   // none of them were suitable.
   if (!Found.empty()) {
-    Diag(StartLoc, diag::err_no_suitable_delete_member_function_found)
-      << Name << RD;
+    if (Diagnose) {
+      Diag(StartLoc, diag::err_no_suitable_delete_member_function_found)
+        << Name << RD;
 
-    for (LookupResult::iterator F = Found.begin(), FEnd = Found.end();
-         F != FEnd; ++F)
-      Diag((*F)->getUnderlyingDecl()->getLocation(),
-           diag::note_member_declared_here) << Name;
-
+      for (LookupResult::iterator F = Found.begin(), FEnd = Found.end();
+           F != FEnd; ++F)
+        Diag((*F)->getUnderlyingDecl()->getLocation(),
+             diag::note_member_declared_here) << Name;
+    }
     return true;
   }
 
@@ -1634,8 +1653,8 @@ bool Sema::FindDeallocationFunction(SourceLocation StartLoc, CXXRecordDecl *RD,
   Expr* DeallocArgs[1];
   DeallocArgs[0] = &Null;
   if (FindAllocationOverload(StartLoc, SourceRange(), Name,
-                             DeallocArgs, 1, TUDecl, /*AllowMissing=*/false,
-                             Operator))
+                             DeallocArgs, 1, TUDecl, !Diagnose,
+                             Operator, Diagnose))
     return true;
 
   assert(Operator && "Did not find a deallocation function!");
@@ -2417,6 +2436,7 @@ static bool CheckUnaryTypeTraitTypeCompleteness(Sema &S,
     // C++0x [meta.unary.prop] Table 49 requires the following traits to be
     // applied to a complete type.
   case UTT_IsTrivial:
+  case UTT_IsTriviallyCopyable:
   case UTT_IsStandardLayout:
   case UTT_IsPOD:
   case UTT_IsLiteral:
@@ -2513,6 +2533,8 @@ static bool EvaluateUnaryTypeTrait(Sema &Self, UnaryTypeTrait UTT,
     return T.isVolatileQualified();
   case UTT_IsTrivial:
     return T->isTrivialType();
+  case UTT_IsTriviallyCopyable:
+    return T->isTriviallyCopyableType();
   case UTT_IsStandardLayout:
     return T->isStandardLayoutType();
   case UTT_IsPOD:

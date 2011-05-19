@@ -33,12 +33,12 @@ CXXRecordDecl::DefinitionData::DefinitionData(CXXRecordDecl *D)
     Aggregate(true), PlainOldData(true), Empty(true), Polymorphic(false),
     Abstract(false), IsStandardLayout(true), HasNoNonEmptyBases(true),
     HasPrivateFields(false), HasProtectedFields(false), HasPublicFields(false),
-    HasTrivialDefaultConstructor(true),
+    HasMutableFields(false), HasTrivialDefaultConstructor(true),
     HasConstExprNonCopyMoveConstructor(false), HasTrivialCopyConstructor(true),
     HasTrivialMoveConstructor(true), HasTrivialCopyAssignment(true),
     HasTrivialMoveAssignment(true), HasTrivialDestructor(true),
     HasNonLiteralTypeFieldsOrBases(false), ComputedVisibleConversions(false),
-    NeedsImplicitDefaultConstructor(false), DeclaredDefaultConstructor(false),
+    UserProvidedDefaultConstructor(false), DeclaredDefaultConstructor(false),
     DeclaredCopyConstructor(false), DeclaredCopyAssignment(false),
     DeclaredDestructor(false), NumBases(0), NumVBases(0), Bases(), VBases(),
     Definition(D), FirstFriend(0) {
@@ -225,6 +225,10 @@ CXXRecordDecl::setBases(CXXBaseSpecifier const * const *Bases,
     //   have trivial destructors.
     if (!BaseClassDecl->hasTrivialDestructor())
       data().HasTrivialDestructor = false;
+    
+    // Keep track of the presence of mutable fields.
+    if (BaseClassDecl->hasMutableFields())
+      data().HasMutableFields = true;
   }
   
   if (VBases.empty())
@@ -460,7 +464,6 @@ void CXXRecordDecl::addedMember(Decl *D) {
       // declared it.
       if (Constructor->isDefaultConstructor()) {
         data().DeclaredDefaultConstructor = true;
-        data().NeedsImplicitDefaultConstructor = true;
       }
       // If this is the implicit copy constructor, note that we have now
       // declared it.
@@ -491,9 +494,6 @@ void CXXRecordDecl::addedMember(Decl *D) {
     // Note that we have a user-declared constructor.
     data().UserDeclaredConstructor = true;
 
-    // Note that we have no need of an implicitly-declared default constructor.
-    data().NeedsImplicitDefaultConstructor = true;
-    
     // FIXME: Under C++0x, /only/ special member functions may be user-provided.
     //        This is probably a defect.
     bool UserProvided = false;
@@ -504,6 +504,7 @@ void CXXRecordDecl::addedMember(Decl *D) {
       data().DeclaredDefaultConstructor = true;
       if (Constructor->isUserProvided()) {
         data().HasTrivialDefaultConstructor = false;
+        data().UserProvidedDefaultConstructor = true;
         UserProvided = true;
       }
     }
@@ -558,21 +559,20 @@ void CXXRecordDecl::addedMember(Decl *D) {
   }
 
   // Handle (user-declared) destructors.
-  if (isa<CXXDestructorDecl>(D)) {
+  if (CXXDestructorDecl *DD = dyn_cast<CXXDestructorDecl>(D)) {
     data().DeclaredDestructor = true;
     data().UserDeclaredDestructor = true;
     
     // C++ [class]p4: 
     //   A POD-struct is an aggregate class that has [...] no user-defined 
     //   destructor.
+    // This bit is the C++03 POD bit, not the 0x one.
     data().PlainOldData = false;
     
-    // C++ [class.dtor]p3: 
-    //   A destructor is trivial if it is an implicitly-declared destructor and
-    //   [...].
-    //
-    // FIXME: C++0x: don't do this for "= default" destructors
-    data().HasTrivialDestructor = false;
+    // C++0x [class.dtor]p5: 
+    //   A destructor is trivial if it is not user-provided and [...]
+    if (DD->isUserProvided())
+      data().HasTrivialDestructor = false;
     
     return;
   }
@@ -610,9 +610,7 @@ void CXXRecordDecl::addedMember(Decl *D) {
       // C++ [class]p4:
       //   A POD-struct is an aggregate class that [...] has no user-defined
       //   copy assignment operator [...].
-      // FIXME: This should be probably determined dynamically in terms of
-      // other more precise attributes to correctly model how it is specified
-      // in C++0x. Setting it here happens to do the right thing.
+      // This is the C++03 bit only.
       data().PlainOldData = false;
 
       if (!isRValueRefArg) {
@@ -625,16 +623,16 @@ void CXXRecordDecl::addedMember(Decl *D) {
         // C++0x [class.copy]p27:
         //   A copy/move assignment operator for class X is trivial if it is
         //   neither user-provided nor deleted [...]
-        // FIXME: C++0x: don't do this for "= default" copy operators.
-        data().HasTrivialCopyAssignment = false;
+        if (Method->isUserProvided())
+          data().HasTrivialCopyAssignment = false;
       } else {
         // This is a move assignment operator.
 
         // C++0x [class.copy]p27:
         //   A copy/move assignment operator for class X is trivial if it is
         //   neither user-provided nor deleted [...]
-        // FIXME: C++0x: don't do this for "= default" copy operators.
-        data().HasTrivialMoveAssignment = false;
+        if (Method->isUserProvided())
+          data().HasTrivialMoveAssignment = false;
       }
     }
 
@@ -691,6 +689,10 @@ void CXXRecordDecl::addedMember(Decl *D) {
          data().HasPublicFields) > 1)
       data().IsStandardLayout = false;
 
+    // Keep track of the presence of mutable fields.
+    if (Field->isMutable())
+      data().HasMutableFields = true;
+    
     // C++0x [class]p9:
     //   A POD struct is a class that is both a trivial class and a 
     //   standard-layout class, and has no non-static data members of type 
@@ -782,6 +784,10 @@ void CXXRecordDecl::addedMember(Decl *D) {
             }
           }
         }
+        
+        // Keep track of the presence of mutable fields.
+        if (FieldRec->hasMutableFields())
+          data().HasMutableFields = true;
       }
     }
 

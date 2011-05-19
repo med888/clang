@@ -2819,17 +2819,8 @@ void clang_getSpellingLocation(CXSourceLocation location,
                                unsigned *offset) {
   SourceLocation Loc = SourceLocation::getFromRawEncoding(location.int_data);
 
-  if (!location.ptr_data[0] || Loc.isInvalid()) {
-    if (file)
-      *file = 0;
-    if (line)
-      *line = 0;
-    if (column)
-      *column = 0;
-    if (offset)
-      *offset = 0;
-    return;
-  }
+  if (!location.ptr_data[0] || Loc.isInvalid())
+    return createNullLocation(file, line, column, offset);
 
   const SourceManager &SM =
     *static_cast<const SourceManager*>(location.ptr_data[0]);
@@ -2846,6 +2837,9 @@ void clang_getSpellingLocation(CXSourceLocation location,
   std::pair<FileID, unsigned> LocInfo = SM.getDecomposedLoc(SpellLoc);
   FileID FID = LocInfo.first;
   unsigned FileOffset = LocInfo.second;
+
+  if (FID.isInvalid())
+    return createNullLocation(file, line, column, offset);
 
   if (file)
     *file = (void *)SM.getFileEntryForID(FID);
@@ -5190,6 +5184,19 @@ unsigned clang_CXXMethod_isStatic(CXCursor C) {
   else
     Method = dyn_cast_or_null<CXXMethodDecl>(D);
   return (Method && Method->isStatic()) ? 1 : 0;
+}
+
+unsigned clang_CXXMethod_isVirtual(CXCursor C) {
+  if (!clang_isDeclaration(C.kind))
+    return 0;
+  
+  CXXMethodDecl *Method = 0;
+  Decl *D = cxcursor::getCursorDecl(C);
+  if (FunctionTemplateDecl *FunTmpl = dyn_cast_or_null<FunctionTemplateDecl>(D))
+    Method = dyn_cast<CXXMethodDecl>(FunTmpl->getTemplatedDecl());
+  else
+    Method = dyn_cast_or_null<CXXMethodDecl>(D);
+  return (Method && Method->isVirtual()) ? 1 : 0;
 }
 
 } // end: extern "C"
