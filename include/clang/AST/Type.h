@@ -1436,6 +1436,14 @@ public:
   /// or an enum decl which has an unsigned representation.
   bool isUnsignedIntegerType() const;
 
+  /// Determines whether this is an integer type that is signed or an 
+  /// enumeration types whose underlying type is a signed integer type.
+  bool isSignedIntegerOrEnumerationType() const;
+  
+  /// Determines whether this is an integer type that is unsigned or an 
+  /// enumeration types whose underlying type is a unsigned integer type.
+  bool isUnsignedIntegerOrEnumerationType() const;
+
   /// isConstantSizeType - Return true if this is not a variable sized type,
   /// according to the rules of C99 6.7.5p3.  It is not legal to call this on
   /// incomplete types.
@@ -2815,6 +2823,39 @@ public:
 
   static void Profile(llvm::FoldingSetNodeID &ID, const ASTContext &Context,
                       Expr *E);
+};
+
+/// \brief A unary type transform, which is a type constructed from another
+class UnaryTransformType : public Type {
+public:
+  enum UTTKind {
+    EnumUnderlyingType
+  };
+
+private:
+  /// The untransformed type.
+  QualType BaseType;
+  /// The transformed type if not dependent, otherwise the same as BaseType.
+  QualType UnderlyingType;
+
+  UTTKind UKind;
+protected:
+  UnaryTransformType(QualType BaseTy, QualType UnderlyingTy, UTTKind UKind,
+                     QualType CanonicalTy);
+  friend class ASTContext;
+public:
+  bool isSugared() const { return !isDependentType(); }
+  QualType desugar() const { return UnderlyingType; }
+
+  QualType getUnderlyingType() const { return UnderlyingType; }
+  QualType getBaseType() const { return BaseType; }
+
+  UTTKind getUTTKind() const { return UKind; }
+  
+  static bool classof(const Type *T) {
+    return T->getTypeClass() == UnaryTransform;
+  }
+  static bool classof(const UnaryTransformType *) { return true; }
 };
 
 class TagType : public Type {

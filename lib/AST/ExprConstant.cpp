@@ -221,7 +221,7 @@ static APSInt HandleFloatToIntCast(QualType DestType, QualType SrcType,
                                    APFloat &Value, const ASTContext &Ctx) {
   unsigned DestWidth = Ctx.getIntWidth(DestType);
   // Determine whether we are converting to unsigned or signed.
-  bool DestSigned = DestType->isSignedIntegerType();
+  bool DestSigned = DestType->isSignedIntegerOrEnumerationType();
 
   // FIXME: Warning for overflow.
   uint64_t Space[4];
@@ -247,7 +247,7 @@ static APSInt HandleIntToIntCast(QualType DestType, QualType SrcType,
   // Figure out if this is a truncate, extend or noop cast.
   // If the input is signed, do a sign extend, noop, or truncate.
   Result = Result.extOrTrunc(DestWidth);
-  Result.setIsUnsigned(DestType->isUnsignedIntegerType());
+  Result.setIsUnsigned(DestType->isUnsignedIntegerOrEnumerationType());
   return Result;
 }
 
@@ -947,7 +947,7 @@ public:
   bool Success(const llvm::APSInt &SI, const Expr *E) {
     assert(E->getType()->isIntegralOrEnumerationType() && 
            "Invalid evaluation result.");
-    assert(SI.isSigned() == E->getType()->isSignedIntegerType() &&
+    assert(SI.isSigned() == E->getType()->isSignedIntegerOrEnumerationType() &&
            "Invalid evaluation result.");
     assert(SI.getBitWidth() == Info.Ctx.getIntWidth(E->getType()) &&
            "Invalid evaluation result.");
@@ -961,7 +961,8 @@ public:
     assert(I.getBitWidth() == Info.Ctx.getIntWidth(E->getType()) &&
            "Invalid evaluation result.");
     Result = APValue(APSInt(I));
-    Result.getInt().setIsUnsigned(E->getType()->isUnsignedIntegerType());
+    Result.getInt().setIsUnsigned(
+                            E->getType()->isUnsignedIntegerOrEnumerationType());
     return true;
   }
 
@@ -2558,7 +2559,7 @@ static bool Evaluate(EvalInfo &Info, const Expr *E) {
   if (E->getType()->isVectorType()) {
     if (!EvaluateVector(E, Info.EvalResult.Val, Info))
       return false;
-  } else if (E->getType()->isIntegerType()) {
+  } else if (E->getType()->isIntegralOrEnumerationType()) {
     if (!IntExprEvaluator(Info, Info.EvalResult.Val).Visit(E))
       return false;
     if (Info.EvalResult.Val.isLValue() &&
@@ -2956,6 +2957,21 @@ static ICEDiag CheckICE(const Expr* E, ASTContext &Ctx) {
     case BO_LAnd:
     case BO_LOr: {
       ICEDiag LHSResult = CheckICE(Exp->getLHS(), Ctx);
+
+      // C++0x [expr.const]p2:
+      //   [...] subexpressions of logical AND (5.14), logical OR
+      //   (5.15), and condi- tional (5.16) operations that are not
+      //   evaluated are not considered.
+      if (Ctx.getLangOptions().CPlusPlus0x && LHSResult.Val == 0) {
+        if (Exp->getOpcode() == BO_LAnd && 
+            Exp->getLHS()->EvaluateAsInt(Ctx) == 0)
+          return LHSResult;
+
+        if (Exp->getOpcode() == BO_LOr &&
+            Exp->getLHS()->EvaluateAsInt(Ctx) != 0)
+          return LHSResult;
+      }
+
       ICEDiag RHSResult = CheckICE(Exp->getRHS(), Ctx);
       if (LHSResult.Val == 0 && RHSResult.Val == 1) {
         // Rare case where the RHS has a comma "side-effect"; we need
@@ -3014,10 +3030,22 @@ static ICEDiag CheckICE(const Expr* E, ASTContext &Ctx) {
         return NoDiag();
       }
     ICEDiag CondResult = CheckICE(Exp->getCond(), Ctx);
-    ICEDiag TrueResult = CheckICE(Exp->getTrueExpr(), Ctx);
-    ICEDiag FalseResult = CheckICE(Exp->getFalseExpr(), Ctx);
     if (CondResult.Val == 2)
       return CondResult;
+
+    // C++0x [expr.const]p2:
+    //   subexpressions of [...] conditional (5.16) operations that
+    //   are not evaluated are not considered
+    bool TrueBranch = Ctx.getLangOptions().CPlusPlus0x
+      ? Exp->getCond()->EvaluateAsInt(Ctx) != 0
+      : false;
+    ICEDiag TrueResult = NoDiag();
+    if (!Ctx.getLangOptions().CPlusPlus0x || TrueBranch)
+      TrueResult = CheckICE(Exp->getTrueExpr(), Ctx);
+    ICEDiag FalseResult = NoDiag();
+    if (!Ctx.getLangOptions().CPlusPlus0x || !TrueBranch)
+      FalseResult = CheckICE(Exp->getFalseExpr(), Ctx);
+
     if (TrueResult.Val == 2)
       return TrueResult;
     if (FalseResult.Val == 2)

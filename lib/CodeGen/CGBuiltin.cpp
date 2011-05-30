@@ -164,9 +164,8 @@ static Value *EmitFAbs(CodeGenFunction &CGF, Value *V, QualType ValTy) {
   }
   
   // The prototype is something that takes and returns whatever V's type is.
-  std::vector<const llvm::Type*> Args;
-  Args.push_back(V->getType());
-  llvm::FunctionType *FT = llvm::FunctionType::get(V->getType(), Args, false);
+  llvm::FunctionType *FT = llvm::FunctionType::get(V->getType(), V->getType(),
+                                                   false);
   llvm::Value *Fn = CGF.CGM.CreateRuntimeFunction(FT, FnName);
 
   return CGF.Builder.CreateCall(Fn, V, "abs");
@@ -1184,6 +1183,41 @@ Value *CodeGenFunction::EmitARMBuiltinExpr(unsigned BuiltinID,
     llvm::StringRef Name = FD->getName();
     return Builder.CreateCall(CGM.CreateRuntimeFunction(FTy, Name),
                               Ops.begin(), Ops.end());
+  }
+
+  if (BuiltinID == ARM::BI__builtin_arm_ldrexd) {
+    Function *F = CGM.getIntrinsic(Intrinsic::arm_ldrexd);
+
+    Value *LdPtr = EmitScalarExpr(E->getArg(0));
+    Value *Val = Builder.CreateCall(F, LdPtr, "ldrexd");
+
+    Value *Val0 = Builder.CreateExtractValue(Val, 1);
+    Value *Val1 = Builder.CreateExtractValue(Val, 0);
+    Val0 = Builder.CreateZExt(Val0, Int64Ty);
+    Val1 = Builder.CreateZExt(Val1, Int64Ty);
+
+    Value *ShiftCst = llvm::ConstantInt::get(Int64Ty, 32);
+    Val = Builder.CreateShl(Val0, ShiftCst, "shl", true /* nuw */);
+    return Builder.CreateOr(Val, Val1);
+  }
+
+  if (BuiltinID == ARM::BI__builtin_arm_strexd) {
+    Function *F = CGM.getIntrinsic(Intrinsic::arm_strexd);
+    llvm::Type *STy = llvm::StructType::get(getLLVMContext(), Int32Ty, Int32Ty,
+                                            NULL);
+
+    Value *One = llvm::ConstantInt::get(Int32Ty, 1);
+    Value *Tmp = Builder.CreateAlloca(Int64Ty, One, "tmp");
+    Value *Val = EmitScalarExpr(E->getArg(0));
+    Builder.CreateStore(Val, Tmp);
+
+    Value *LdPtr = Builder.CreateBitCast(Tmp,llvm::PointerType::getUnqual(STy));
+    Val = Builder.CreateLoad(LdPtr);
+
+    Value *Arg0 = Builder.CreateExtractValue(Val, 0);
+    Value *Arg1 = Builder.CreateExtractValue(Val, 1);
+    Value *StPtr = EmitScalarExpr(E->getArg(1));
+    return Builder.CreateCall3(F, Arg0, Arg1, StPtr, "strexd");
   }
 
   llvm::SmallVector<Value*, 4> Ops;

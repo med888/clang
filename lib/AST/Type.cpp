@@ -648,6 +648,20 @@ bool Type::isSignedIntegerType() const {
   return false;
 }
 
+bool Type::isSignedIntegerOrEnumerationType() const {
+  if (const BuiltinType *BT = dyn_cast<BuiltinType>(CanonicalType)) {
+    return BT->getKind() >= BuiltinType::Char_S &&
+    BT->getKind() <= BuiltinType::Int128;
+  }
+  
+  if (const EnumType *ET = dyn_cast<EnumType>(CanonicalType)) {
+    if (ET->getDecl()->isComplete())
+      return ET->getDecl()->getIntegerType()->isSignedIntegerType();
+  }
+  
+  return false;
+}
+
 bool Type::hasSignedIntegerRepresentation() const {
   if (const VectorType *VT = dyn_cast<VectorType>(CanonicalType))
     return VT->getElementType()->isSignedIntegerType();
@@ -671,6 +685,20 @@ bool Type::isUnsignedIntegerType() const {
       return ET->getDecl()->getIntegerType()->isUnsignedIntegerType();
   }
 
+  return false;
+}
+
+bool Type::isUnsignedIntegerOrEnumerationType() const {
+  if (const BuiltinType *BT = dyn_cast<BuiltinType>(CanonicalType)) {
+    return BT->getKind() >= BuiltinType::Bool &&
+    BT->getKind() <= BuiltinType::UInt128;
+  }
+  
+  if (const EnumType *ET = dyn_cast<EnumType>(CanonicalType)) {
+    if (ET->getDecl()->isComplete())
+      return ET->getDecl()->getIntegerType()->isUnsignedIntegerType();
+  }
+  
   return false;
 }
 
@@ -1506,6 +1534,16 @@ static TagDecl *getInterestingTagDecl(TagDecl *decl) {
   // If there's no definition (not even in progress), return what we have.
   return decl;
 }
+
+UnaryTransformType::UnaryTransformType(QualType BaseType,
+                                       QualType UnderlyingType,
+                                       UTTKind UKind,
+                                       QualType CanonicalType)
+  : Type(UnaryTransform, CanonicalType, UnderlyingType->isDependentType(),
+         UnderlyingType->isVariablyModifiedType(),
+         BaseType->containsUnexpandedParameterPack())
+  , BaseType(BaseType), UnderlyingType(UnderlyingType), UKind(UKind)
+{}
 
 TagDecl *TagType::getDecl() const {
   return getInterestingTagDecl(decl);

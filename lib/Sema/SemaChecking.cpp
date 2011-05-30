@@ -2376,7 +2376,7 @@ IntRange GetValueRange(ASTContext &C, APValue &result, QualType Ty,
   // the sign right on this one case.  It would be nice if APValue
   // preserved this.
   assert(result.isLValue());
-  return IntRange(MaxWidth, Ty->isUnsignedIntegerType());
+  return IntRange(MaxWidth, Ty->isUnsignedIntegerOrEnumerationType());
 }
 
 /// Pseudo-evaluate the given integer expression, estimating the
@@ -2550,7 +2550,8 @@ IntRange GetExprRange(ASTContext &C, Expr *E, unsigned MaxWidth) {
     llvm::APSInt BitWidthAP = BitField->getBitWidth()->EvaluateAsInt(C);
     unsigned BitWidth = BitWidthAP.getZExtValue();
 
-    return IntRange(BitWidth, BitField->getType()->isUnsignedIntegerType());
+    return IntRange(BitWidth, 
+                    BitField->getType()->isUnsignedIntegerOrEnumerationType());
   }
 
   return IntRange::forValueOfType(C, E->getType());
@@ -2966,6 +2967,13 @@ void CheckImplicitConversion(Sema &S, Expr *E, QualType T,
 
   if (!Source->isIntegerType() || !Target->isIntegerType())
     return;
+
+  if ((E->isNullPointerConstant(S.Context, Expr::NPC_ValueDependentIsNotNull)
+           == Expr::NPCK_GNUNull) && Target->isIntegerType()) {
+    S.Diag(E->getExprLoc(), diag::warn_impcast_null_pointer_to_integer)
+        << E->getSourceRange() << clang::SourceRange(CC);
+    return;
+  }
 
   IntRange SourceRange = GetExprRange(S.Context, E);
   IntRange TargetRange = IntRange::forTargetOfCanonicalType(S.Context, Target);

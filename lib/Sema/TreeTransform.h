@@ -702,6 +702,11 @@ public:
   /// By default, builds a new TypeOfType with the given underlying type.
   QualType RebuildTypeOfType(QualType Underlying);
 
+  /// \brief Build a new unary transform type.
+  QualType RebuildUnaryTransformType(QualType BaseType,
+                                     UnaryTransformType::UTTKind UKind,
+                                     SourceLocation Loc);
+
   /// \brief Build a new C++0x decltype type.
   ///
   /// By default, performs semantic analysis when building the decltype type.
@@ -1373,7 +1378,7 @@ public:
                                          UnaryExprOrTypeTrait ExprKind,
                                          SourceRange R) {
     ExprResult Result
-      = getSema().CreateUnaryExprOrTypeTraitExpr(SubExpr, OpLoc, ExprKind, R);
+      = getSema().CreateUnaryExprOrTypeTraitExpr(SubExpr, OpLoc, ExprKind);
     if (Result.isInvalid())
       return ExprError();
 
@@ -4155,6 +4160,29 @@ QualType TreeTransform<Derived>::TransformDecltypeType(TypeLocBuilder &TLB,
   DecltypeTypeLoc NewTL = TLB.push<DecltypeTypeLoc>(Result);
   NewTL.setNameLoc(TL.getNameLoc());
 
+  return Result;
+}
+
+template<typename Derived>
+QualType TreeTransform<Derived>::TransformUnaryTransformType(
+                                                            TypeLocBuilder &TLB,
+                                                     UnaryTransformTypeLoc TL) {
+  QualType Result = TL.getType();
+  if (Result->isDependentType()) {
+    const UnaryTransformType *T = TL.getTypePtr();
+    QualType NewBase =
+      getDerived().TransformType(TL.getUnderlyingTInfo())->getType();
+    Result = getDerived().RebuildUnaryTransformType(NewBase,
+                                                    T->getUTTKind(),
+                                                    TL.getKWLoc());
+    if (Result.isNull())
+      return QualType();
+  }
+
+  UnaryTransformTypeLoc NewTL = TLB.push<UnaryTransformTypeLoc>(Result);
+  NewTL.setKWLoc(TL.getKWLoc());
+  NewTL.setParensRange(TL.getParensRange());
+  NewTL.setUnderlyingTInfo(TL.getUnderlyingTInfo());
   return Result;
 }
 
@@ -7803,20 +7831,21 @@ TreeTransform<Derived>::TransformBlockExpr(BlockExpr *E) {
 #ifndef NDEBUG
   // In builds with assertions, make sure that we captured everything we
   // captured before.
+  if (!SemaRef.getDiagnostics().hasErrorOccurred()) {
+    for (BlockDecl::capture_iterator i = oldBlock->capture_begin(),
+           e = oldBlock->capture_end(); i != e; ++i) {
+      VarDecl *oldCapture = i->getVariable();
 
-  for (BlockDecl::capture_iterator i = oldBlock->capture_begin(),
-         e = oldBlock->capture_end(); i != e; ++i) {
-    VarDecl *oldCapture = i->getVariable();
+      // Ignore parameter packs.
+      if (isa<ParmVarDecl>(oldCapture) &&
+          cast<ParmVarDecl>(oldCapture)->isParameterPack())
+        continue;
 
-    // Ignore parameter packs.
-    if (isa<ParmVarDecl>(oldCapture) &&
-        cast<ParmVarDecl>(oldCapture)->isParameterPack())
-      continue;
-
-    VarDecl *newCapture =
-      cast<VarDecl>(getDerived().TransformDecl(E->getCaretLocation(),
-                                               oldCapture));
-    assert(blockScope->CaptureMap.count(newCapture));
+      VarDecl *newCapture =
+        cast<VarDecl>(getDerived().TransformDecl(E->getCaretLocation(),
+                                                 oldCapture));
+      assert(blockScope->CaptureMap.count(newCapture));
+    }
   }
 #endif
 
@@ -8049,6 +8078,13 @@ template<typename Derived>
 QualType TreeTransform<Derived>::RebuildDecltypeType(Expr *E,
                                                      SourceLocation Loc) {
   return SemaRef.BuildDecltypeType(E, Loc);
+}
+
+template<typename Derived>
+QualType TreeTransform<Derived>::RebuildUnaryTransformType(QualType BaseType,
+                                            UnaryTransformType::UTTKind UKind,
+                                            SourceLocation Loc) {
+  return SemaRef.BuildUnaryTransformType(BaseType, UKind, Loc);
 }
 
 template<typename Derived>

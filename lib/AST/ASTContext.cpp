@@ -39,8 +39,12 @@ unsigned ASTContext::NumImplicitDefaultConstructors;
 unsigned ASTContext::NumImplicitDefaultConstructorsDeclared;
 unsigned ASTContext::NumImplicitCopyConstructors;
 unsigned ASTContext::NumImplicitCopyConstructorsDeclared;
+unsigned ASTContext::NumImplicitMoveConstructors;
+unsigned ASTContext::NumImplicitMoveConstructorsDeclared;
 unsigned ASTContext::NumImplicitCopyAssignmentOperators;
 unsigned ASTContext::NumImplicitCopyAssignmentOperatorsDeclared;
+unsigned ASTContext::NumImplicitMoveAssignmentOperators;
+unsigned ASTContext::NumImplicitMoveAssignmentOperatorsDeclared;
 unsigned ASTContext::NumImplicitDestructors;
 unsigned ASTContext::NumImplicitDestructorsDeclared;
 
@@ -318,9 +322,17 @@ void ASTContext::PrintStats() const {
   fprintf(stderr, "  %u/%u implicit copy constructors created\n",
           NumImplicitCopyConstructorsDeclared, 
           NumImplicitCopyConstructors);
+  if (getLangOptions().CPlusPlus)
+    fprintf(stderr, "  %u/%u implicit move constructors created\n",
+            NumImplicitMoveConstructorsDeclared, 
+            NumImplicitMoveConstructors);
   fprintf(stderr, "  %u/%u implicit copy assignment operators created\n",
           NumImplicitCopyAssignmentOperatorsDeclared, 
           NumImplicitCopyAssignmentOperators);
+  if (getLangOptions().CPlusPlus)
+    fprintf(stderr, "  %u/%u implicit move assignment operators created\n",
+            NumImplicitMoveAssignmentOperatorsDeclared, 
+            NumImplicitMoveAssignmentOperators);
   fprintf(stderr, "  %u/%u implicit destructors created\n",
           NumImplicitDestructorsDeclared, NumImplicitDestructors);
   
@@ -975,6 +987,9 @@ ASTContext::getTypeInfo(const Type *T) const {
     return getTypeInfo(cast<DecltypeType>(T)->getUnderlyingExpr()->getType()
                         .getTypePtr());
 
+  case Type::UnaryTransform:
+    return getTypeInfo(cast<UnaryTransformType>(T)->getUnderlyingType());
+
   case Type::Elaborated:
     return getTypeInfo(cast<ElaboratedType>(T)->getNamedType().getTypePtr());
 
@@ -1423,6 +1438,9 @@ QualType ASTContext::getBlockPointerType(QualType T) const {
 /// lvalue reference to the specified type.
 QualType
 ASTContext::getLValueReferenceType(QualType T, bool SpelledAsLValue) const {
+  assert(getCanonicalType(T) != OverloadTy && 
+         "Unresolved overloaded function type");
+  
   // Unique pointers, to guarantee there is only one pointer of a particular
   // structure.
   llvm::FoldingSetNodeID ID;
@@ -1602,6 +1620,7 @@ QualType ASTContext::getVariableArrayDecayedType(QualType type) const {
   case Type::TypeOfExpr:
   case Type::TypeOf:
   case Type::Decltype:
+  case Type::UnaryTransform:
   case Type::DependentName:
   case Type::InjectedClassName:
   case Type::TemplateSpecialization:
@@ -2799,6 +2818,21 @@ QualType ASTContext::getDecltypeType(Expr *e) const {
   return QualType(dt, 0);
 }
 
+/// getUnaryTransformationType - We don't unique these, since the memory
+/// savings are minimal and these are rare.
+QualType ASTContext::getUnaryTransformType(QualType BaseType,
+                                           QualType UnderlyingType,
+                                           UnaryTransformType::UTTKind Kind)
+    const {
+  UnaryTransformType *Ty =
+    new (*this, TypeAlignment) UnaryTransformType (BaseType, UnderlyingType, 
+                                                   Kind,
+                                 UnderlyingType->isDependentType() ?
+                                    QualType() : UnderlyingType);
+  Types.push_back(Ty);
+  return QualType(Ty, 0);
+}
+
 /// getAutoType - We only unique auto types after they've been deduced.
 QualType ASTContext::getAutoType(QualType DeducedType) const {
   void *InsertPos = 0;
@@ -3695,7 +3729,7 @@ bool ASTContext::BlockRequiresCopying(QualType Ty) const {
   if (getLangOptions().CPlusPlus) {
     if (const RecordType *RT = Ty->getAs<RecordType>()) {
       CXXRecordDecl *RD = cast<CXXRecordDecl>(RT->getDecl());
-      return RD->hasConstCopyConstructor(*this);
+      return RD->hasConstCopyConstructor();
       
     }
   }
@@ -3781,6 +3815,9 @@ static bool isTypeTypedefedAsBOOL(QualType T) {
 /// getObjCEncodingTypeSize returns size of type for objective-c encoding
 /// purpose.
 CharUnits ASTContext::getObjCEncodingTypeSize(QualType type) const {
+  if (!type->isIncompleteArrayType() && type->isIncompleteType())
+    return CharUnits::Zero();
+  
   CharUnits sz = getTypeSizeInChars(type);
 
   // Make all integer and enum types at least as large as an int
@@ -3848,7 +3885,7 @@ std::string ASTContext::getObjCEncodingForBlock(const BlockExpr *Expr) const {
   return S;
 }
 
-void ASTContext::getObjCEncodingForFunctionDecl(const FunctionDecl *Decl,
+bool ASTContext::getObjCEncodingForFunctionDecl(const FunctionDecl *Decl,
                                                 std::string& S) {
   // Encode result type.
   getObjCEncodingForType(Decl->getResultType(), S);
@@ -3858,8 +3895,11 @@ void ASTContext::getObjCEncodingForFunctionDecl(const FunctionDecl *Decl,
        E = Decl->param_end(); PI != E; ++PI) {
     QualType PType = (*PI)->getType();
     CharUnits sz = getObjCEncodingTypeSize(PType);
+    if (sz.isZero())
+      return true;
+    
     assert (sz.isPositive() && 
-        "getObjCEncodingForMethodDecl - Incomplete param type");
+        "getObjCEncodingForFunctionDecl - Incomplete param type");
     ParmOffset += sz;
   }
   S += charUnitsToString(ParmOffset);
@@ -3882,11 +3922,13 @@ void ASTContext::getObjCEncodingForFunctionDecl(const FunctionDecl *Decl,
     S += charUnitsToString(ParmOffset);
     ParmOffset += getObjCEncodingTypeSize(PType);
   }
+  
+  return false;
 }
 
 /// getObjCEncodingForMethodDecl - Return the encoded type for this method
 /// declaration.
-void ASTContext::getObjCEncodingForMethodDecl(const ObjCMethodDecl *Decl,
+bool ASTContext::getObjCEncodingForMethodDecl(const ObjCMethodDecl *Decl,
                                               std::string& S) const {
   // FIXME: This is not very efficient.
   // Encode type qualifer, 'in', 'inout', etc. for the return type.
@@ -3905,6 +3947,9 @@ void ASTContext::getObjCEncodingForMethodDecl(const ObjCMethodDecl *Decl,
        E = Decl->sel_param_end(); PI != E; ++PI) {
     QualType PType = (*PI)->getType();
     CharUnits sz = getObjCEncodingTypeSize(PType);
+    if (sz.isZero())
+      return true;
+    
     assert (sz.isPositive() && 
         "getObjCEncodingForMethodDecl - Incomplete param type");
     ParmOffset += sz;
@@ -3934,6 +3979,8 @@ void ASTContext::getObjCEncodingForMethodDecl(const ObjCMethodDecl *Decl,
     S += charUnitsToString(ParmOffset);
     ParmOffset += getObjCEncodingTypeSize(PType);
   }
+  
+  return false;
 }
 
 /// getObjCEncodingForPropertyDecl - Return the encoded type for this
