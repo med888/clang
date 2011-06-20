@@ -7218,13 +7218,13 @@ QualType Sema::CheckAdditionOperands( // C99 6.5.6
       } else if (PointeeTy->isFunctionType()) {
         if (getLangOptions().CPlusPlus) {
           Diag(Loc, diag::err_typecheck_pointer_arith_function_type)
-            << lex.get()->getType() << lex.get()->getSourceRange();
+            << PExp->getType() << PExp->getSourceRange();
           return QualType();
         }
 
         // GNU extension: arithmetic on pointer to function
         Diag(Loc, diag::ext_gnu_ptr_func_arith)
-          << lex.get()->getType() << lex.get()->getSourceRange();
+          << PExp->getType() << PExp->getSourceRange();
       } else {
         // Check if we require a complete type.
         if (((PExp->getType()->isPointerType() &&
@@ -8945,31 +8945,39 @@ ExprResult Sema::CreateBuiltinBinOp(SourceLocation OpLoc,
   // are mainly cases where the null pointer is used as an integer instead
   // of a pointer.
   if (LeftNull || RightNull) {
-    if (Opc == BO_Mul || Opc == BO_Div || Opc == BO_Rem || Opc == BO_Add ||
-        Opc == BO_Sub || Opc == BO_Shl || Opc == BO_Shr || Opc == BO_And ||
-        Opc == BO_Xor || Opc == BO_Or || Opc == BO_MulAssign ||
-        Opc == BO_DivAssign || Opc == BO_AddAssign || Opc == BO_SubAssign ||
-        Opc == BO_RemAssign || Opc == BO_ShlAssign || Opc == BO_ShrAssign ||
-        Opc == BO_AndAssign || Opc == BO_OrAssign || Opc == BO_XorAssign) {
-      // These are the operations that would not make sense with a null pointer
-      // no matter what the other expression is.
-      Diag(OpLoc, diag::warn_null_in_arithmetic_operation)
-        << (LeftNull ? lhs.get()->getSourceRange() : SourceRange())
-        << (RightNull ? rhs.get()->getSourceRange() : SourceRange());
-    } else if (Opc == BO_LE || Opc == BO_LT || Opc == BO_GE || Opc == BO_GT ||
-               Opc == BO_EQ || Opc == BO_NE) {
-      // These are the operations that would not make sense with a null pointer
-      // if the other expression the other expression is not a pointer.
-      QualType LeftType = lhs.get()->getType();
-      QualType RightType = rhs.get()->getType();
-      if (LeftNull != RightNull &&
-          !LeftType->isPointerLikeType() &&
-          !LeftType->canDecayToPointerType() &&
-          !RightType->isPointerLikeType() &&
-          !RightType->canDecayToPointerType()) {
+    // Avoid analyzing cases where the result will either be invalid (and
+    // diagnosed as such) or entirely valid and not something to warn about.
+    QualType LeftType = lhs.get()->getType();
+    QualType RightType = rhs.get()->getType();
+    if (!LeftType->isBlockPointerType() && !LeftType->isMemberPointerType() &&
+        !LeftType->isFunctionType() &&
+        !RightType->isBlockPointerType() &&
+        !RightType->isMemberPointerType() &&
+        !RightType->isFunctionType()) {
+      if (Opc == BO_Mul || Opc == BO_Div || Opc == BO_Rem || Opc == BO_Add ||
+          Opc == BO_Sub || Opc == BO_Shl || Opc == BO_Shr || Opc == BO_And ||
+          Opc == BO_Xor || Opc == BO_Or || Opc == BO_MulAssign ||
+          Opc == BO_DivAssign || Opc == BO_AddAssign || Opc == BO_SubAssign ||
+          Opc == BO_RemAssign || Opc == BO_ShlAssign || Opc == BO_ShrAssign ||
+          Opc == BO_AndAssign || Opc == BO_OrAssign || Opc == BO_XorAssign) {
+        // These are the operations that would not make sense with a null pointer
+        // no matter what the other expression is.
         Diag(OpLoc, diag::warn_null_in_arithmetic_operation)
-          << (LeftNull ? lhs.get()->getSourceRange()
-                       : rhs.get()->getSourceRange());
+          << (LeftNull ? lhs.get()->getSourceRange() : SourceRange())
+          << (RightNull ? rhs.get()->getSourceRange() : SourceRange());
+      } else if (Opc == BO_LE || Opc == BO_LT || Opc == BO_GE || Opc == BO_GT ||
+                 Opc == BO_EQ || Opc == BO_NE) {
+        // These are the operations that would not make sense with a null pointer
+        // if the other expression the other expression is not a pointer.
+        if (LeftNull != RightNull &&
+            !LeftType->isAnyPointerType() &&
+            !LeftType->canDecayToPointerType() &&
+            !RightType->isAnyPointerType() &&
+            !RightType->canDecayToPointerType()) {
+          Diag(OpLoc, diag::warn_null_in_arithmetic_operation)
+            << (LeftNull ? lhs.get()->getSourceRange()
+                         : rhs.get()->getSourceRange());
+        }
       }
     }
   }
