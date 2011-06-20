@@ -49,51 +49,55 @@ namespace {
     /// types and the function declaration into a module if they're not used, and
     /// avoids constructing the type more than once if it's used more than once.
     class LazyRuntimeFunction {
-        CodeGenModule *CGM;
-        std::vector<const llvm::Type*> ArgTys;
-        const char *FunctionName;
-        llvm::Function *Function;
-    public:
-        /// Constructor leaves this class uninitialized, because it is intended to
-        /// be used as a field in another class and not all of the types that are
-        /// used as arguments will necessarily be available at construction time.
-        LazyRuntimeFunction() : CGM(0), FunctionName(0), Function(0) {}
-        
-        /// Initialises the lazy function with the name, return type, and the types
-        /// of the arguments.
-        END_WITH_NULL
-        void init(CodeGenModule *Mod, const char *name,
-                  const llvm::Type *RetTy, ...) {
-            CGM =Mod;
-            FunctionName = name;
-            Function = 0;
-            ArgTys.clear();
-            va_list Args;
-            va_start(Args, RetTy);
-            while (const llvm::Type *ArgTy = va_arg(Args, const llvm::Type*))
-                ArgTys.push_back(ArgTy);
-            va_end(Args);
-            // Push the return type on at the end so we can pop it off easily
-            ArgTys.push_back(RetTy);
-        }
-        /// Overloaded cast operator, allows the class to be implicitly cast to an
-        /// LLVM constant.
-        operator llvm::Function*() {
-            if (!Function) {
-                if (0 == FunctionName) return 0;
-                // We put the return type on the end of the vector, so pop it back off
-                const llvm::Type *RetTy = ArgTys.back();
-                ArgTys.pop_back();
-                llvm::FunctionType *FTy = llvm::FunctionType::get(RetTy, ArgTys, false);
-                Function =
-                cast<llvm::Function>(CGM->CreateRuntimeFunction(FTy, FunctionName));
-                // We won't need to use the types again, so we may as well clean up the
-                // vector now
-                ArgTys.resize(0);
-            }
-            return Function;
-        }
-    };
+		CodeGenModule *CGM;
+		std::vector<const llvm::Type*> ArgTys;
+		const char *FunctionName;
+		llvm::Constant *Function;
+	public:
+		/// Constructor leaves this class uninitialized, because it is intended to
+		/// be used as a field in another class and not all of the types that are
+		/// used as arguments will necessarily be available at construction time.
+		LazyRuntimeFunction() : CGM(0), FunctionName(0), Function(0) {}
+		
+		/// Initialises the lazy function with the name, return type, and the types
+		/// of the arguments.
+		END_WITH_NULL
+		void init(CodeGenModule *Mod, const char *name,
+				  const llvm::Type *RetTy, ...) {
+			CGM =Mod;
+			FunctionName = name;
+			Function = 0;
+			ArgTys.clear();
+			va_list Args;
+			va_start(Args, RetTy);
+			while (const llvm::Type *ArgTy = va_arg(Args, const llvm::Type*))
+				ArgTys.push_back(ArgTy);
+			va_end(Args);
+			// Push the return type on at the end so we can pop it off easily
+			ArgTys.push_back(RetTy);
+		}
+		/// Overloaded cast operator, allows the class to be implicitly cast to an
+		/// LLVM constant.
+		operator llvm::Constant*() {
+			if (!Function) {
+				if (0 == FunctionName) return 0;
+				// We put the return type on the end of the vector, so pop it back off
+				const llvm::Type *RetTy = ArgTys.back();
+				ArgTys.pop_back();
+				llvm::FunctionType *FTy = llvm::FunctionType::get(RetTy, ArgTys, false);
+				Function =
+				cast<llvm::Constant>(CGM->CreateRuntimeFunction(FTy, FunctionName));
+				// We won't need to use the types again, so we may as well clean up the
+				// vector now
+				ArgTys.resize(0);
+			}
+			return Function;
+		}
+		operator llvm::Function*() {
+			return cast<llvm::Function>((llvm::Constant*)*this);
+		}
+		
+	};
     
     
     /// GNU Objective-C runtime code generation.  This class implements the parts of
@@ -321,7 +325,7 @@ namespace {
         
         /// The version of the runtime that this class targets.  Must match the
         /// version in the runtime.
-        const int RuntimeVersion;
+		int RuntimeVersion;
         /// The version of the protocol class.  Used to differentiate between ObjC1
         /// and ObjC2 protocols.  Objective-C 1 protocols can not contain optional
         /// components and can not contain declared properties.  We always emit
@@ -457,10 +461,10 @@ namespace {
                                                  const ObjCProtocolDecl *PD);
         virtual void GenerateProtocol(const ObjCProtocolDecl *PD);
         virtual llvm::Function *ModuleInitFunction();
-        virtual llvm::Function *GetPropertyGetFunction();
-        virtual llvm::Function *GetPropertySetFunction();
-        virtual llvm::Function *GetSetStructFunction();
-        virtual llvm::Function *GetGetStructFunction();
+        virtual llvm::Constant *GetPropertyGetFunction();
+        virtual llvm::Constant *GetPropertySetFunction();
+        virtual llvm::Constant *GetSetStructFunction();
+        virtual llvm::Constant *GetGetStructFunction();
         virtual llvm::Constant *EnumerationMutationFunction();
         
         virtual void EmitTryStmt(CodeGenFunction &CGF,
@@ -612,14 +616,16 @@ ProtocolVersion(0) {
                              PtrDiffTy, BoolTy, BoolTy, NULL);
     
     // IMP type
-    std::vector<const llvm::Type*> IMPArgs;
-    IMPArgs.push_back(IdTy);
-    IMPArgs.push_back(SelectorTy);
+	const llvm::Type *IMPArgs[] = { IdTy, SelectorTy };
     IMPTy = llvm::PointerType::getUnqual(llvm::FunctionType::get(IdTy, IMPArgs,
                                                                  true));
     
     // Don't bother initialising the GC stuff unless we're compiling in GC mode
-    if (CGM.getLangOptions().getGCMode() != LangOptions::NonGC) {
+    if (CGM.getLangOptions().getGCMode() != LangOptions::NonGC) {		
+		// This is a bit of an hack.  We should sort this out by having a proper
+		// CGObjCGNUstep subclass for GC, but we may want to really support the old
+		// ABI and GC added in ObjectiveC2.framework, so we fudge it a bit for now
+		RuntimeVersion = 10;
         // Get selectors needed in GC mode
         RetainSel = GetNullarySelector("retain", CGM.getContext());
         ReleaseSel = GetNullarySelector("release", CGM.getContext());
@@ -663,11 +669,8 @@ llvm::Value *CGObjCCocotron::GetClass(CGBuilderTy &Builder,
     EmitClassRef(OID->getNameAsString());
     ClassName = Builder.CreateStructGEP(ClassName, 0);
     
-    std::vector<const llvm::Type*> Params(1, PtrToInt8Ty);
     llvm::Constant *ClassLookupFn =
-    CGM.CreateRuntimeFunction(llvm::FunctionType::get(IdTy,
-                                                      Params,
-                                                      true),
+	CGM.CreateRuntimeFunction(llvm::FunctionType::get(IdTy, PtrToInt8Ty, true),
                                                       "objc_lookUpClass");
     return Builder.CreateCall(ClassLookupFn, ClassName);
 }
@@ -859,16 +862,17 @@ CGObjCCocotron::GenerateMessageSendSuper(CodeGenFunction &CGF,
                                     bool IsClassMessage,
                                     const CallArgList &CallArgs,
                                     const ObjCMethodDecl *Method) {
-    if (CGM.getLangOptions().getGCMode() != LangOptions::NonGC) {
+    CGBuilderTy &Builder = CGF.Builder;
+	if (CGM.getLangOptions().getGCMode() == LangOptions::GCOnly) {
         if (Sel == RetainSel || Sel == AutoreleaseSel) {
-            return RValue::get(Receiver);
-        }
+			return RValue::get(EnforceType(Builder, Receiver,
+										   CGM.getTypes().ConvertType(ResultType)));        
+		}
         if (Sel == ReleaseSel) {
             return RValue::get(0);
         }
     }
     
-    CGBuilderTy &Builder = CGF.Builder;
     llvm::Value *cmd = GetSelector(Builder, Sel);
     
     
@@ -876,7 +880,7 @@ CGObjCCocotron::GenerateMessageSendSuper(CodeGenFunction &CGF,
     
     ActualArgs.add(RValue::get(EnforceType(Builder, Receiver, IdTy)), ASTIdTy);
     ActualArgs.add(RValue::get(cmd), CGF.getContext().getObjCSelType());
-    ActualArgs.insert(ActualArgs.end(), CallArgs.begin(), CallArgs.end());
+    ActualArgs.addFrom(CallArgs);
     
     CodeGenTypes &Types = CGM.getTypes();
     const CGFunctionInfo &FnInfo = Types.getFunctionInfo(ResultType, ActualArgs,
@@ -885,14 +889,12 @@ CGObjCCocotron::GenerateMessageSendSuper(CodeGenFunction &CGF,
     llvm::Value *ReceiverClass = 0;
     if (isCategoryImpl) {
         llvm::Constant *classLookupFunction = 0;
-        std::vector<const llvm::Type*> Params;
-        Params.push_back(PtrTy);
         if (IsClassMessage)  {
             classLookupFunction = CGM.CreateRuntimeFunction(llvm::FunctionType::get(
-                                                                                    IdTy, Params, true), "objc_get_meta_class");
+                                                                                    IdTy, PtrTy, true), "objc_get_meta_class");
         } else {
             classLookupFunction = CGM.CreateRuntimeFunction(llvm::FunctionType::get(
-                                                                                    IdTy, Params, true), "objc_get_class");
+                                                                                    IdTy, PtrTy, true), "objc_get_class");
         }
         ReceiverClass = Builder.CreateCall(classLookupFunction,
                                            MakeConstantString(Class->getNameAsString()));
@@ -965,18 +967,19 @@ CGObjCCocotron::GenerateMessageSend(CodeGenFunction &CGF,
                                const CallArgList &CallArgs,
                                const ObjCInterfaceDecl *Class,
                                const ObjCMethodDecl *Method) {
-    // Strip out message sends to retain / release in GC mode
-    if (CGM.getLangOptions().getGCMode() != LangOptions::NonGC) {
+	CGBuilderTy &Builder = CGF.Builder;
+	
+	// Strip out message sends to retain / release in GC mode
+    if (CGM.getLangOptions().getGCMode() == LangOptions::GCOnly) {
         if (Sel == RetainSel || Sel == AutoreleaseSel) {
-            return RValue::get(Receiver);
+            return RValue::get(EnforceType(Builder, Receiver,
+							  CGM.getTypes().ConvertType(ResultType)));
         }
         if (Sel == ReleaseSel) {
             return RValue::get(0);
         }
     }
-    
-    CGBuilderTy &Builder = CGF.Builder;
-    
+        
     // If the return type is something that goes in an integer register, the
     // runtime will handle 0 returns.  For other cases, we fill in the 0 value
     // ourselves.
@@ -1028,7 +1031,7 @@ CGObjCCocotron::GenerateMessageSend(CodeGenFunction &CGF,
     CallArgList ActualArgs;
     ActualArgs.add(RValue::get(Receiver), ASTIdTy);
     ActualArgs.add(RValue::get(cmd), CGF.getContext().getObjCSelType());
-    ActualArgs.insert(ActualArgs.end(), CallArgs.begin(), CallArgs.end());
+    ActualArgs.addFrom(CallArgs);
     
     CodeGenTypes &Types = CGM.getTypes();
     const CGFunctionInfo &FnInfo = Types.getFunctionInfo(ResultType, ActualArgs,
@@ -1991,29 +1994,26 @@ llvm::Function *CGObjCCocotron::ModuleInitFunction() {
     // Number of classes defined.
     Elements.push_back(llvm::ConstantInt::get(llvm::Type::getInt16Ty(VMContext),
                                               Classes.size()));
-    
     // Number of categories defined
     Elements.push_back(llvm::ConstantInt::get(llvm::Type::getInt16Ty(VMContext),
                                               Categories.size()));
     // Create an array of classes, then categories, then static object instances
-    Classes.insert(Classes.end(), Categories.begin(), Categories.end());
-    
+    Classes.insert(Classes.end(), Categories.begin(), Categories.end());    
     //  NULL-terminated list of static object instances (mainly constant strings)
     Classes.push_back(Statics);
     Classes.push_back(NULLPtr);
-    
     llvm::Constant *ClassList = llvm::ConstantArray::get(ClassListTy, Classes);
     Elements.push_back(ClassList);
     // Construct the symbol table
-    
     llvm::Constant *SymTab= MakeGlobal(SymTabTy, Elements);
-    
-    
+        
     // The symbol table is contained in a module which has some version-checking
     // constants
     llvm::StructType * ModuleTy = llvm::StructType::get(LongTy, LongTy,
-                                                        PtrToInt8Ty, llvm::PointerType::getUnqual(SymTabTy), NULL);
-    Elements.clear();
+														PtrToInt8Ty, llvm::PointerType::getUnqual(SymTabTy), 
+														(CGM.getLangOptions().getGCMode() == LangOptions::NonGC) ? NULL : IntTy,
+														NULL);    
+	Elements.clear();
     // Runtime version, used for ABI compatibility checking.
     Elements.push_back(llvm::ConstantInt::get(LongTy, RuntimeVersion));
     // sizeof(ModuleTy)
@@ -2023,15 +2023,23 @@ llvm::Function *CGObjCCocotron::ModuleInitFunction() {
                                               td.getTypeSizeInBits(ModuleTy) /
                                               CGM.getContext().getCharWidth()));
     
-    
     // The path to the source file where this module was declared
     SourceManager &SM = CGM.getContext().getSourceManager();
     const FileEntry *mainFile = SM.getFileEntryForID(SM.getMainFileID());
     std::string path =
     std::string(mainFile->getDir()->getName()) + '/' + mainFile->getName();
     Elements.push_back(MakeConstantString(path, ".objc_source_file_name"));
-    
     Elements.push_back(SymTab);
+	
+	switch (CGM.getLangOptions().getGCMode()) {
+		case LangOptions::GCOnly:
+			Elements.push_back(llvm::ConstantInt::get(IntTy, 2));
+		case LangOptions::NonGC:
+			break;
+		case LangOptions::HybridGC:
+			Elements.push_back(llvm::ConstantInt::get(IntTy, 1));				
+	}
+	
     llvm::Value *Module = MakeGlobal(ModuleTy, Elements);
     
     // Create the load function calling the runtime entry point with the module
@@ -2045,10 +2053,10 @@ llvm::Function *CGObjCCocotron::ModuleInitFunction() {
     CGBuilderTy Builder(VMContext);
     Builder.SetInsertPoint(EntryBB);
     
-    std::vector<const llvm::Type*> Params(1,
-                                          llvm::PointerType::getUnqual(ModuleTy));
-    llvm::Value *Register = CGM.CreateRuntimeFunction(llvm::FunctionType::get(
-                                                                              llvm::Type::getVoidTy(VMContext), Params, true), "__objc_exec_class");
+	llvm::FunctionType *FT =
+	   llvm::FunctionType::get(Builder.getVoidTy(),
+							   llvm::PointerType::getUnqual(ModuleTy), true);
+	llvm::Value *Register = CGM.CreateRuntimeFunction(FT, "__objc_exec_class");
     Builder.CreateCall(Register, Module);
     Builder.CreateRetVoid();
     
@@ -2078,18 +2086,18 @@ llvm::Function *CGObjCCocotron::GenerateMethod(const ObjCMethodDecl *OMD,
     return Method;
 }
 
-llvm::Function *CGObjCCocotron::GetPropertyGetFunction() {
+llvm::Constant *CGObjCCocotron::GetPropertyGetFunction() {
     return GetPropertyFn;
 }
 
-llvm::Function *CGObjCCocotron::GetPropertySetFunction() {
+llvm::Constant *CGObjCCocotron::GetPropertySetFunction() {
     return SetPropertyFn;
 }
 
-llvm::Function *CGObjCCocotron::GetGetStructFunction() {
+llvm::Constant *CGObjCCocotron::GetGetStructFunction() {
     return GetStructPropertyFn;
 }
-llvm::Function *CGObjCCocotron::GetSetStructFunction() {
+llvm::Constant *CGObjCCocotron::GetSetStructFunction() {
     return SetStructPropertyFn;
 }
 
@@ -2159,7 +2167,7 @@ void CGObjCCocotron::EmitThrowStmt(CodeGenFunction &CGF,
 llvm::Value * CGObjCCocotron::EmitObjCWeakRead(CodeGenFunction &CGF,
                                           llvm::Value *AddrWeakObj) {
     CGBuilderTy B = CGF.Builder;
-    AddrWeakObj = EnforceType(B, AddrWeakObj, IdTy);
+    AddrWeakObj = EnforceType(B, AddrWeakObj, PtrToIdTy);
     return B.CreateCall(WeakReadFn, AddrWeakObj);
 }
 
@@ -2189,7 +2197,7 @@ void CGObjCCocotron::EmitObjCIvarAssign(CodeGenFunction &CGF,
                                    llvm::Value *ivarOffset) {
     CGBuilderTy B = CGF.Builder;
     src = EnforceType(B, src, IdTy);
-    dst = EnforceType(B, dst, PtrToIdTy);
+    dst = EnforceType(B, dst, IdTy);
     B.CreateCall3(IvarAssignFn, src, dst, ivarOffset);
 }
 
@@ -2206,8 +2214,8 @@ void CGObjCCocotron::EmitGCMemmoveCollectable(CodeGenFunction &CGF,
                                          llvm::Value *SrcPtr,
                                          llvm::Value *Size) {
     CGBuilderTy B = CGF.Builder;
-    DestPtr = EnforceType(B, DestPtr, IdTy);
-    SrcPtr = EnforceType(B, SrcPtr, PtrToIdTy);
+    DestPtr = EnforceType(B, DestPtr, PtrTy);
+    SrcPtr = EnforceType(B, SrcPtr, PtrTy);
     
     B.CreateCall3(MemMoveFn, DestPtr, SrcPtr, Size);
 }
