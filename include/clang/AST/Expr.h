@@ -515,6 +515,14 @@ public:
   /// ParenExpr or ImplicitCastExprs, returning their operand.
   Expr *IgnoreParenImpCasts();
 
+  /// IgnoreConversionOperator - Ignore conversion operator. If this Expr is a
+  /// call to a conversion operator, return the argument.
+  Expr *IgnoreConversionOperator();
+
+  const Expr *IgnoreConversionOperator() const {
+    return const_cast<Expr*>(this)->IgnoreConversionOperator();
+  }
+
   const Expr *IgnoreParenImpCasts() const {
     return const_cast<Expr*>(this)->IgnoreParenImpCasts();
   }
@@ -2268,6 +2276,8 @@ private:
     case CK_IntegralComplexToReal:
     case CK_IntegralComplexCast:
     case CK_IntegralComplexToFloatingComplex:
+    case CK_ObjCProduceObject:
+    case CK_ObjCConsumeObject:
       assert(!getType()->isBooleanType() && "unheralded conversion to bool");
       // fallthrough to check for null base path
 
@@ -3529,9 +3539,9 @@ public:
     bool isArrayDesignator() const { return Kind == ArrayDesignator; }
     bool isArrayRangeDesignator() const { return Kind == ArrayRangeDesignator; }
 
-    IdentifierInfo * getFieldName();
+    IdentifierInfo *getFieldName() const;
 
-    FieldDecl *getField() {
+    FieldDecl *getField() const {
       assert(Kind == FieldDesignator && "Only valid on a field designator");
       if (Field.NameOrField & 0x01)
         return 0;
@@ -3604,9 +3614,15 @@ public:
   unsigned size() const { return NumDesignators; }
 
   // Iterator access to the designators.
-  typedef Designator* designators_iterator;
+  typedef Designator *designators_iterator;
   designators_iterator designators_begin() { return Designators; }
   designators_iterator designators_end() {
+    return Designators + NumDesignators;
+  }
+
+  typedef const Designator *const_designators_iterator;
+  const_designators_iterator designators_begin() const { return Designators; }
+  const_designators_iterator designators_end() const {
     return Designators + NumDesignators;
   }
 
@@ -3617,6 +3633,15 @@ public:
   }
   reverse_designators_iterator designators_rend() {
     return reverse_designators_iterator(designators_begin());
+  }
+
+  typedef std::reverse_iterator<const_designators_iterator>
+          const_reverse_designators_iterator;
+  const_reverse_designators_iterator designators_rbegin() const {
+    return const_reverse_designators_iterator(designators_end());
+  }
+  const_reverse_designators_iterator designators_rend() const {
+    return const_reverse_designators_iterator(designators_begin());
   }
 
   Designator *getDesignator(unsigned Idx) { return &designators_begin()[Idx]; }
@@ -4026,6 +4051,42 @@ public:
   child_range children() { return child_range(); }
 };
 
+/// AsTypeExpr - Clang builtin function __builtin_astype [OpenCL 6.2.4.2]
+/// This AST node provides support for reinterpreting a type to another
+/// type of the same size.
+class AsTypeExpr : public Expr {
+private:
+  Expr* SrcExpr;
+  QualType DstType;
+  SourceLocation BuiltinLoc, RParenLoc;
+  
+public:
+  AsTypeExpr(Expr* SrcExpr, QualType DstType,
+             ExprValueKind VK, ExprObjectKind OK,
+             SourceLocation BuiltinLoc, SourceLocation RParenLoc)
+  : Expr(AsTypeExprClass, DstType, VK, OK, false, false, false), 
+  SrcExpr(SrcExpr), DstType(DstType),
+  BuiltinLoc(BuiltinLoc), RParenLoc(RParenLoc) {}
+  
+  /// \brief Build an empty __builtin_astype
+  explicit AsTypeExpr(EmptyShell Empty) : Expr(AsTypeExprClass, Empty) {}
+  
+  /// getSrcExpr - Return the Expr to be converted.
+  Expr *getSrcExpr() const { return SrcExpr; }
+  QualType getDstType() const { return DstType; }
+  
+  SourceRange getSourceRange() const {
+    return SourceRange(BuiltinLoc, RParenLoc);
+  }
+  
+  static bool classof(const Stmt *T) {
+    return T->getStmtClass() == AsTypeExprClass; 
+  }
+  static bool classof(const AsTypeExpr *) { return true; }
+  
+  // Iterators
+  child_range children() { return child_range(); }
+};
 }  // end namespace clang
 
 #endif

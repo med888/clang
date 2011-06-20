@@ -92,6 +92,7 @@ PCHValidator::ReadLanguageOptions(const LangOptions &LangOpts) {
   PARSE_LANGOPT_IMPORTANT(AppleKext, diag::warn_pch_apple_kext);
   PARSE_LANGOPT_IMPORTANT(ObjCDefaultSynthProperties,
                           diag::warn_pch_objc_auto_properties);
+  PARSE_LANGOPT_BENIGN(ObjCInferRelatedResultType)
   PARSE_LANGOPT_IMPORTANT(NoConstantCFStrings,
                           diag::warn_pch_no_constant_cfstrings);
   PARSE_LANGOPT_BENIGN(PascalStrings);
@@ -146,9 +147,11 @@ PCHValidator::ReadLanguageOptions(const LangOptions &LangOpts) {
   PARSE_LANGOPT_IMPORTANT(OpenCL, diag::warn_pch_opencl);
   PARSE_LANGOPT_IMPORTANT(CUDA, diag::warn_pch_cuda);
   PARSE_LANGOPT_BENIGN(CatchUndefined);
+  PARSE_LANGOPT_BENIGN(DefaultFPContract);
   PARSE_LANGOPT_IMPORTANT(ElideConstructors, diag::warn_pch_elide_constructors);
   PARSE_LANGOPT_BENIGN(SpellChecking);
-  PARSE_LANGOPT_BENIGN(DefaultFPContract);
+  PARSE_LANGOPT_IMPORTANT(ObjCAutoRefCount, diag::warn_pch_auto_ref_count);
+  PARSE_LANGOPT_BENIGN(ObjCInferRelatedReturnType);
 #undef PARSE_LANGOPT_IMPORTANT
 #undef PARSE_LANGOPT_BENIGN
 
@@ -1842,6 +1845,22 @@ MacroDefinition *ASTReader::getMacroDefinition(MacroID ID) {
   return MacroDefinitionsLoaded[ID - 1];
 }
 
+const FileEntry *ASTReader::getFileEntry(llvm::StringRef filenameStrRef) {
+  std::string Filename = filenameStrRef;
+  MaybeAddSystemRootToFilename(Filename);
+  const FileEntry *File = FileMgr.getFile(Filename);
+  if (File == 0 && !OriginalDir.empty() && !CurrentDir.empty() &&
+      OriginalDir != CurrentDir) {
+    std::string resolved = resolveFileRelativeToOriginalDir(Filename,
+                                                            OriginalDir,
+                                                            CurrentDir);
+    if (!resolved.empty())
+      File = FileMgr.getFile(resolved);
+  }
+
+  return File;
+}
+
 /// \brief If we are loading a relocatable PCH file, and the filename is
 /// not an absolute path, add the system root to the beginning of the file
 /// name.
@@ -2177,6 +2196,11 @@ ASTReader::ReadASTBlock(PerFileData &F) {
       F.LocalSLocSize = Record[1];
       break;
 
+    case FILE_SOURCE_LOCATION_OFFSETS:
+      F.SLocFileOffsets = (const uint32_t *)BlobStart;
+      F.LocalNumSLocFileEntries = Record[0];
+      break;
+
     case SOURCE_LOCATION_PRELOADS:
       if (PreloadSLocEntries.empty())
         PreloadSLocEntries.swap(Record);
@@ -2351,6 +2375,75 @@ ASTReader::ReadASTBlock(PerFileData &F) {
   return Failure;
 }
 
+ASTReader::ASTReadResult ASTReader::validateFileEntries() {
+  for (unsigned CI = 0, CN = Chain.size(); CI != CN; ++CI) {
+    PerFileData *F = Chain[CI];
+    llvm::BitstreamCursor &SLocEntryCursor = F->SLocEntryCursor;
+
+    for (unsigned i = 0, e = F->LocalNumSLocFileEntries; i != e; ++i) {
+      SLocEntryCursor.JumpToBit(F->SLocFileOffsets[i]);
+      unsigned Code = SLocEntryCursor.ReadCode();
+      if (Code == llvm::bitc::END_BLOCK ||
+          Code == llvm::bitc::ENTER_SUBBLOCK ||
+          Code == llvm::bitc::DEFINE_ABBREV) {
+        Error("incorrectly-formatted source location entry in AST file");
+        return Failure;
+      }
+  
+      RecordData Record;
+      const char *BlobStart;
+      unsigned BlobLen;
+      switch (SLocEntryCursor.ReadRecord(Code, Record, &BlobStart, &BlobLen)) {
+      default:
+        Error("incorrectly-formatted source location entry in AST file");
+        return Failure;
+  
+      case SM_SLOC_FILE_ENTRY: {
+        llvm::StringRef Filename(BlobStart, BlobLen);
+        const FileEntry *File = getFileEntry(Filename);
+
+        if (File == 0) {
+          std::string ErrorStr = "could not find file '";
+          ErrorStr += Filename;
+          ErrorStr += "' referenced by AST file";
+          Error(ErrorStr.c_str());
+          return IgnorePCH;
+        }
+  
+        if (Record.size() < 6) {
+          Error("source location entry is incorrect");
+          return Failure;
+        }
+
+        // The stat info from the FileEntry came from the cached stat
+        // info of the PCH, so we cannot trust it.
+        struct stat StatBuf;
+        if (::stat(File->getName(), &StatBuf) != 0) {
+          StatBuf.st_size = File->getSize();
+          StatBuf.st_mtime = File->getModificationTime();
+        }
+
+        if (((off_t)Record[4] != StatBuf.st_size
+#if !defined(LLVM_ON_WIN32)
+            // In our regression testing, the Windows file system seems to
+            // have inconsistent modification times that sometimes
+            // erroneously trigger this error-handling path.
+             || (time_t)Record[5] != StatBuf.st_mtime
+#endif
+            )) {
+          Error(diag::err_fe_pch_file_modified, Filename);
+          return IgnorePCH;
+        }
+
+        break;
+      }
+      }
+    }
+  }
+
+  return Success;
+}
+
 ASTReader::ASTReadResult ASTReader::ReadAST(const std::string &FileName,
                                             ASTFileType Type) {
   switch(ReadASTCore(FileName, Type)) {
@@ -2360,6 +2453,14 @@ ASTReader::ASTReadResult ASTReader::ReadAST(const std::string &FileName,
   }
 
   // Here comes stuff that we only do once the entire chain is loaded.
+
+  if (!DisableValidation) {
+    switch(validateFileEntries()) {
+    case Failure: return Failure;
+    case IgnorePCH: return IgnorePCH;
+    case Success: break;
+    }
+  }
 
   // Allocate space for loaded slocentries, identifiers, decls and types.
   unsigned TotalNumIdentifiers = 0, TotalNumTypes = 0, TotalNumDecls = 0,
@@ -2836,6 +2937,7 @@ bool ASTReader::ParseLanguageOptions(
     PARSE_LANGOPT(ObjCNonFragileABI2);
     PARSE_LANGOPT(AppleKext);
     PARSE_LANGOPT(ObjCDefaultSynthProperties);
+    PARSE_LANGOPT(ObjCInferRelatedResultType);
     PARSE_LANGOPT(NoConstantCFStrings);
     PARSE_LANGOPT(PascalStrings);
     PARSE_LANGOPT(WritableStrings);
@@ -2880,6 +2982,7 @@ bool ASTReader::ParseLanguageOptions(
     PARSE_LANGOPT(ElideConstructors);
     PARSE_LANGOPT(SpellChecking);
     PARSE_LANGOPT(MRTD);
+    PARSE_LANGOPT(ObjCAutoRefCount);
   #undef PARSE_LANGOPT
 
     return Listener->ReadLanguageOptions(LangOpts);
@@ -3125,12 +3228,13 @@ QualType ASTReader::ReadTypeRecord(unsigned Index) {
   }
 
   case TYPE_FUNCTION_NO_PROTO: {
-    if (Record.size() != 5) {
+    if (Record.size() != 6) {
       Error("incorrect encoding of no-proto function type");
       return QualType();
     }
     QualType ResultType = GetType(Record[0]);
-    FunctionType::ExtInfo Info(Record[1], Record[2], Record[3], (CallingConv)Record[4]);
+    FunctionType::ExtInfo Info(Record[1], Record[2], Record[3],
+                               (CallingConv)Record[4], Record[5]);
     return Context->getFunctionNoProtoType(ResultType, Info);
   }
 
@@ -3141,9 +3245,10 @@ QualType ASTReader::ReadTypeRecord(unsigned Index) {
     EPI.ExtInfo = FunctionType::ExtInfo(/*noreturn*/ Record[1],
                                         /*hasregparm*/ Record[2],
                                         /*regparm*/ Record[3],
-                                        static_cast<CallingConv>(Record[4]));
+                                        static_cast<CallingConv>(Record[4]),
+                                        /*produces*/ Record[5]);
 
-    unsigned Idx = 5;
+    unsigned Idx = 6;
     unsigned NumParams = Record[Idx++];
     llvm::SmallVector<QualType, 16> ParamTypes;
     for (unsigned I = 0; I != NumParams; ++I)
@@ -5100,7 +5205,8 @@ ASTReader::~ASTReader() {
 }
 
 ASTReader::PerFileData::PerFileData(ASTFileType Ty)
-  : Type(Ty), SizeInBits(0), LocalNumSLocEntries(0), SLocOffsets(0), LocalSLocSize(0),
+  : Type(Ty), SizeInBits(0), LocalNumSLocEntries(0), SLocOffsets(0),
+    SLocFileOffsets(0), LocalSLocSize(0),
     LocalNumIdentifiers(0), IdentifierOffsets(0), IdentifierTableData(0),
     IdentifierLookupTable(0), LocalNumMacroDefinitions(0),
     MacroDefinitionOffsets(0), 

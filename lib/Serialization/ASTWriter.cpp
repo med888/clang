@@ -170,6 +170,7 @@ void ASTTypeWriter::VisitFunctionType(const FunctionType *T) {
   Record.push_back(C.getRegParm());
   // FIXME: need to stabilize encoding of calling convention...
   Record.push_back(C.getCC());
+  Record.push_back(C.getProducesResult());
 }
 
 void ASTTypeWriter::VisitFunctionNoProtoType(const FunctionNoProtoType *T) {
@@ -889,13 +890,14 @@ void ASTWriter::WriteBlockInfoBlock() {
   RECORD(DECL_INDIRECTFIELD);
   RECORD(DECL_EXPANDED_NON_TYPE_TEMPLATE_PARM_PACK);
   
+  // Statements and Exprs can occur in the Decls and Types block.
+  AddStmtsExprs(Stream, Record);
+
   BLOCK(PREPROCESSOR_DETAIL_BLOCK);
   RECORD(PPD_MACRO_INSTANTIATION);
   RECORD(PPD_MACRO_DEFINITION);
   RECORD(PPD_INCLUSION_DIRECTIVE);
   
-  // Statements and Exprs can occur in the Decls and Types block.
-  AddStmtsExprs(Stream, Record);
 #undef RECORD
 #undef BLOCK
   Stream.ExitBlock();
@@ -1049,6 +1051,7 @@ void ASTWriter::WriteLanguageOptions(const LangOptions &LangOpts) {
   Record.push_back(LangOpts.AppleKext);          // Apple's kernel extensions ABI
   Record.push_back(LangOpts.ObjCDefaultSynthProperties); // Objective-C auto-synthesized
                                                       // properties enabled.
+  Record.push_back(LangOpts.ObjCInferRelatedResultType);
   Record.push_back(LangOpts.NoConstantCFStrings); // non cfstring generation enabled..
 
   Record.push_back(LangOpts.PascalStrings);  // Allow Pascal strings
@@ -1107,6 +1110,8 @@ void ASTWriter::WriteLanguageOptions(const LangOptions &LangOpts) {
   Record.push_back(LangOpts.ElideConstructors);
   Record.push_back(LangOpts.SpellChecking);
   Record.push_back(LangOpts.MRTD);
+  Record.push_back(LangOpts.ObjCAutoRefCount);
+  Record.push_back(LangOpts.ObjCInferRelatedReturnType);
   Stream.EmitRecord(LANGUAGE_OPTIONS, Record);
 }
 
@@ -1449,6 +1454,9 @@ void ASTWriter::WriteSourceManagerBlock(SourceManager &SourceMgr,
   // Write out the source location entry table. We skip the first
   // entry, which is always the same dummy entry.
   std::vector<uint32_t> SLocEntryOffsets;
+  // Write out the offsets of only source location file entries.
+  // We will go through them in ASTReader::validateFileEntries().
+  std::vector<uint32_t> SLocFileEntryOffsets;
   RecordData PreloadSLocs;
   unsigned BaseSLocID = Chain ? Chain->getTotalNumSLocs() : 0;
   SLocEntryOffsets.reserve(SourceMgr.sloc_entry_size() - 1 - BaseSLocID);
@@ -1463,9 +1471,10 @@ void ASTWriter::WriteSourceManagerBlock(SourceManager &SourceMgr,
     // Figure out which record code to use.
     unsigned Code;
     if (SLoc->isFile()) {
-      if (SLoc->getFile().getContentCache()->OrigEntry)
+      if (SLoc->getFile().getContentCache()->OrigEntry) {
         Code = SM_SLOC_FILE_ENTRY;
-      else
+        SLocFileEntryOffsets.push_back(Stream.GetCurrentBitNo());
+      } else
         Code = SM_SLOC_BUFFER_ENTRY;
     } else
       Code = SM_SLOC_INSTANTIATION_ENTRY;
@@ -1564,6 +1573,18 @@ void ASTWriter::WriteSourceManagerBlock(SourceManager &SourceMgr,
   unsigned BaseOffset = Chain ? Chain->getNextSLocOffset() : 0;
   Record.push_back(SourceMgr.getNextOffset() - BaseOffset);
   Stream.EmitRecordWithBlob(SLocOffsetsAbbrev, Record, data(SLocEntryOffsets));
+
+  Abbrev = new BitCodeAbbrev();
+  Abbrev->Add(BitCodeAbbrevOp(FILE_SOURCE_LOCATION_OFFSETS));
+  Abbrev->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 16)); // # of slocs
+  Abbrev->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Blob)); // offsets
+  unsigned SLocFileOffsetsAbbrev = Stream.EmitAbbrev(Abbrev);
+
+  Record.clear();
+  Record.push_back(FILE_SOURCE_LOCATION_OFFSETS);
+  Record.push_back(SLocFileEntryOffsets.size());
+  Stream.EmitRecordWithBlob(SLocFileOffsetsAbbrev, Record,
+                            data(SLocFileEntryOffsets));
 
   // Write the source location entry preloads array, telling the AST
   // reader which source locations entries it should load eagerly.
@@ -2684,8 +2705,15 @@ ASTWriter::ASTWriter(llvm::BitstreamWriter &Stream)
     NextSelectorID(FirstSelectorID), FirstMacroID(1), NextMacroID(FirstMacroID),
     CollectedStmts(&StmtsToEmit),
     NumStatements(0), NumMacros(0), NumLexicalDeclContexts(0),
-    NumVisibleDeclContexts(0), FirstCXXBaseSpecifiersID(1),
-    NextCXXBaseSpecifiersID(1)
+    NumVisibleDeclContexts(0),
+    FirstCXXBaseSpecifiersID(1), NextCXXBaseSpecifiersID(1),
+    DeclParmVarAbbrev(0), DeclContextLexicalAbbrev(0),
+    DeclContextVisibleLookupAbbrev(0), UpdateVisibleAbbrev(0),
+    DeclRefExprAbbrev(0), CharacterLiteralAbbrev(0),
+    DeclRecordAbbrev(0), IntegerLiteralAbbrev(0),
+    DeclTypedefAbbrev(0),
+    DeclVarAbbrev(0), DeclFieldAbbrev(0),
+    DeclEnumAbbrev(0), DeclObjCIvarAbbrev(0)
 {
 }
 
@@ -2851,7 +2879,7 @@ void ASTWriter::WriteASTCore(Sema &SemaRef, MemorizeStatCalls *StatCalls,
 
   // Keep writing types and declarations until all types and
   // declarations have been written.
-  Stream.EnterSubblock(DECLTYPES_BLOCK_ID, 3);
+  Stream.EnterSubblock(DECLTYPES_BLOCK_ID, NUM_ALLOWED_ABBREVS_SIZE);
   WriteDeclsBlockAbbrevs();
   while (!DeclTypesToEmit.empty()) {
     DeclOrType DOT = DeclTypesToEmit.front();
@@ -3081,7 +3109,7 @@ void ASTWriter::WriteASTChain(Sema &SemaRef, MemorizeStatCalls *StatCalls,
     AddDeclRef(SemaRef.getStdBadAlloc(), SemaDeclRefs);
   }
 
-  Stream.EnterSubblock(DECLTYPES_BLOCK_ID, 3);
+  Stream.EnterSubblock(DECLTYPES_BLOCK_ID, NUM_ALLOWED_ABBREVS_SIZE);
   WriteDeclsBlockAbbrevs();
   for (DeclsToRewriteTy::iterator
          I = DeclsToRewrite.begin(), E = DeclsToRewrite.end(); I != E; ++I)
@@ -3193,7 +3221,7 @@ void ASTWriter::WriteDeclUpdatesBlocks() {
     return;
 
   RecordData OffsetsRecord;
-  Stream.EnterSubblock(DECL_UPDATES_BLOCK_ID, 3);
+  Stream.EnterSubblock(DECL_UPDATES_BLOCK_ID, NUM_ALLOWED_ABBREVS_SIZE);
   for (DeclUpdateMap::iterator
          I = DeclUpdates.begin(), E = DeclUpdates.end(); I != E; ++I) {
     const Decl *D = I->first;

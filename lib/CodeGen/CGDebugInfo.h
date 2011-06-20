@@ -33,11 +33,11 @@ namespace clang {
   class VarDecl;
   class ObjCInterfaceDecl;
   class ClassTemplateSpecializationDecl;
+  class GlobalDecl;
 
 namespace CodeGen {
   class CodeGenModule;
   class CodeGenFunction;
-  class GlobalDecl;
   class CGBlockInfo;
 
 /// CGDebugInfo - This class gathers all debug information during compilation
@@ -98,6 +98,8 @@ class CGDebugInfo {
   llvm::DIType CreateEnumType(const EnumDecl *ED);
   llvm::DIType getOrCreateMethodType(const CXXMethodDecl *Method,
                                      llvm::DIFile F);
+  llvm::DIType getOrCreateFunctionType(const Decl *D, QualType FnType,
+                                       llvm::DIFile F);
   llvm::DIType getOrCreateVTablePtrType(llvm::DIFile F);
   llvm::DINameSpace getOrCreateNameSpace(const NamespaceDecl *N);
   llvm::DIType CreatePointeeType(QualType PointeeTy, llvm::DIFile F);

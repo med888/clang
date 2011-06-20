@@ -30,6 +30,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/Host.h"
 #include "llvm/Support/Process.h"
+#include "llvm/Support/ErrorHandling.h"
 
 #include "InputInfo.h"
 #include "ToolChains.h"
@@ -144,6 +145,28 @@ static void AddLinkerInputs(const ToolChain &TC,
       TC.AddCCKextLibArgs(Args, CmdArgs);
     } else
       A.renderAsInput(Args, CmdArgs);
+  }
+}
+
+/// \brief Determine whether Objective-C automated reference counting is
+/// enabled.
+static bool isObjCAutoRefCount(const ArgList &Args) {
+  return Args.hasFlag(options::OPT_fobjc_arc, options::OPT_fno_objc_arc, false);
+}
+
+static void addProfileRT(const ToolChain &TC, const ArgList &Args,
+                         ArgStringList &CmdArgs) {
+  if (Args.hasArg(options::OPT_fprofile_arcs) ||
+      Args.hasArg(options::OPT_fprofile_generate) ||
+      Args.hasArg(options::OPT_fcreate_profile) ||
+      Args.hasArg(options::OPT_coverage)) {
+    // GCC links libgcov.a by adding -L<inst>/gcc/lib/gcc/<triple>/<ver> -lgcov
+    // to the link line. We cannot do the same thing because unlike gcov
+    // there is a libprofile_rt.so. We used to use the -l:libprofile_rt.a
+    // syntax, but that is not supported by old linkers.
+    const char *lib = Args.MakeArgString(TC.getDriver().Dir + "/../lib/" +
+                                         "libprofile_rt.a");
+    CmdArgs.push_back(lib);
   }
 }
 
@@ -302,8 +325,12 @@ void Clang::AddPreprocessingOptions(const Driver &D,
 
   // Add C++ include arguments, if needed.
   types::ID InputType = Inputs[0].getType();
-  if (types::isCXX(InputType))
-    getToolChain().AddClangCXXStdlibIncludeArgs(Args, CmdArgs);
+  if (types::isCXX(InputType)) {
+    bool ObjCXXAutoRefCount
+      = types::isObjC(InputType) && isObjCAutoRefCount(Args);
+    getToolChain().AddClangCXXStdlibIncludeArgs(Args, CmdArgs, 
+                                                ObjCXXAutoRefCount);
+  }
 
   // Add -Wp, and -Xassembler if using the preprocessor.
 
@@ -763,35 +790,34 @@ void Clang::AddX86TargetArgs(const ArgList &Args,
   if (!CPUName) {
     // FIXME: Need target hooks.
     if (getToolChain().getOS().startswith("darwin")) {
-      if (getToolChain().getArchName() == "x86_64")
+      if (getToolChain().getArch() == llvm::Triple::x86_64)
         CPUName = "core2";
-      else if (getToolChain().getArchName() == "i386")
+      else if (getToolChain().getArch() == llvm::Triple::x86)
         CPUName = "yonah";
     } else if (getToolChain().getOS().startswith("haiku"))  {
-      if (getToolChain().getArchName() == "x86_64")
+      if (getToolChain().getArch() == llvm::Triple::x86_64)
         CPUName = "x86-64";
-      else if (getToolChain().getArchName() == "i386")
+      else if (getToolChain().getArch() == llvm::Triple::x86)
         CPUName = "i586";
     } else if (getToolChain().getOS().startswith("openbsd"))  {
-      if (getToolChain().getArchName() == "x86_64")
+      if (getToolChain().getArch() == llvm::Triple::x86_64)
         CPUName = "x86-64";
-      else if (getToolChain().getArchName() == "i386")
+      else if (getToolChain().getArch() == llvm::Triple::x86)
         CPUName = "i486";
     } else if (getToolChain().getOS().startswith("freebsd"))  {
-      if (getToolChain().getArchName() == "x86_64" ||
-          getToolChain().getArchName() == "amd64")
+      if (getToolChain().getArch() == llvm::Triple::x86_64)
         CPUName = "x86-64";
-      else if (getToolChain().getArchName() == "i386")
+      else if (getToolChain().getArch() == llvm::Triple::x86)
         CPUName = "i486";
     } else if (getToolChain().getOS().startswith("netbsd"))  {
-      if (getToolChain().getArchName() == "x86_64")
+      if (getToolChain().getArch() == llvm::Triple::x86_64)
         CPUName = "x86-64";
-      else if (getToolChain().getArchName() == "i386")
+      else if (getToolChain().getArch() == llvm::Triple::x86)
         CPUName = "i486";
     } else {
-      if (getToolChain().getArchName() == "x86_64")
+      if (getToolChain().getArch() == llvm::Triple::x86_64)
         CPUName = "x86-64";
-      else if (getToolChain().getArchName() == "i386")
+      else if (getToolChain().getArch() == llvm::Triple::x86)
         CPUName = "pentium4";
     }
   }
@@ -1363,6 +1389,22 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
 
   Args.AddLastArg(CmdArgs, options::OPT_working_directory);
 
+  if (!Args.hasArg(options::OPT_fno_objc_arc)) {
+    if (const Arg *A = Args.getLastArg(options::OPT_ccc_arrmt_check,
+                                       options::OPT_ccc_arrmt_modify)) {
+      switch (A->getOption().getID()) {
+      default:
+        llvm_unreachable("missed a case");
+      case options::OPT_ccc_arrmt_check:
+        CmdArgs.push_back("-arcmt-check");
+        break;
+      case options::OPT_ccc_arrmt_modify:
+        CmdArgs.push_back("-arcmt-modify");
+        break;
+      }
+    }
+  }
+    
   // Add preprocessing options like -I, -D, etc. if we are using the
   // preprocessor.
   //
@@ -1527,13 +1569,39 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
                     options::OPT_fno_lax_vector_conversions))
     CmdArgs.push_back("-fno-lax-vector-conversions");
 
+  // Allow -fno-objc-arr to trump -fobjc-arr/-fobjc-arc.
+  // NOTE: This logic is duplicated in ToolChains.cpp.
+  bool ARC = isObjCAutoRefCount(Args);
+  if (ARC) {
+    CmdArgs.push_back("-fobjc-arc");
+
+    // Certain deployment targets don't have runtime support.
+    if (!getToolChain().HasARCRuntime())
+      CmdArgs.push_back("-fobjc-no-arc-runtime");
+
+    // Allow the user to enable full exceptions code emission.
+    // We define off for Objective-CC, on for Objective-C++.
+    if (Args.hasFlag(options::OPT_fobjc_arc_exceptions,
+                     options::OPT_fno_objc_arc_exceptions,
+                     /*default*/ types::isCXX(InputType)))
+      CmdArgs.push_back("-fobjc-arc-exceptions");
+  }
+
+  // -fobjc-infer-related-result-type is the default, except in the Objective-C
+  // rewriter.
+  if (IsRewriter)
+    CmdArgs.push_back("-fno-objc-infer-related-result-type");
+  
   // Handle -fobjc-gc and -fobjc-gc-only. They are exclusive, and -fobjc-gc-only
   // takes precedence.
   const Arg *GCArg = Args.getLastArg(options::OPT_fobjc_gc_only);
   if (!GCArg)
     GCArg = Args.getLastArg(options::OPT_fobjc_gc);
   if (GCArg) {
-    if (getToolChain().SupportsObjCGC()) {
+    if (ARC) {
+      D.Diag(clang::diag::err_drv_objc_gc_arr)
+        << GCArg->getAsString(Args);
+    } else if (getToolChain().SupportsObjCGC()) {
       GCArg->render(Args, CmdArgs);
     } else {
       // FIXME: We should move this to a hard error.
@@ -1707,6 +1775,11 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   if (Arg *A = Args.getLastArg(options::OPT_fgnu_keywords,
                                options::OPT_fno_gnu_keywords))
     A->render(Args, CmdArgs);
+
+  if (Args.hasFlag(options::OPT_fgnu89_inline,
+                   options::OPT_fno_gnu89_inline,
+                   false))
+    CmdArgs.push_back("-fgnu89-inline");
 
   // -fnext-runtime defaults to on Darwin and when rewriting Objective-C, and is
   // -the -cc1 default.    
@@ -2905,6 +2978,7 @@ void darwin::Link::AddLinkArgs(Compilation &C,
   Args.AddLastArg(CmdArgs, options::OPT_dynamic);
   Args.AddAllArgs(CmdArgs, options::OPT_exported__symbols__list);
   Args.AddLastArg(CmdArgs, options::OPT_flat__namespace);
+  Args.AddLastArg(CmdArgs, options::OPT_force__load);
   Args.AddAllArgs(CmdArgs, options::OPT_headerpad__max__install__names);
   Args.AddAllArgs(CmdArgs, options::OPT_image__base);
   Args.AddAllArgs(CmdArgs, options::OPT_init);
@@ -3126,6 +3200,12 @@ void darwin::Link::ConstructJob(Compilation &C, const JobAction &JA,
 
   getDarwinToolChain().AddLinkSearchPathArgs(Args, CmdArgs);
 
+  // In ARC, if we don't have runtime support, link in the runtime
+  // stubs.  We have to do this *before* adding any of the normal
+  // linker inputs so that its initializer gets run first.
+  if (!getDarwinToolChain().HasARCRuntime() && isObjCAutoRefCount(Args))
+    getDarwinToolChain().AddLinkARCArgs(Args, CmdArgs);
+
   AddLinkerInputs(getToolChain(), Inputs, Args, CmdArgs);
 
   if (LinkingOutput) {
@@ -3154,11 +3234,7 @@ void darwin::Link::ConstructJob(Compilation &C, const JobAction &JA,
     // endfile_spec is empty.
   }
 
-  if (Args.hasArg(options::OPT_fprofile_arcs) ||
-      Args.hasArg(options::OPT_fprofile_generate) ||
-      Args.hasArg(options::OPT_fcreate_profile) ||
-      Args.hasArg(options::OPT_coverage))
-    CmdArgs.push_back("-l:libprofile_rt.a");
+  addProfileRT(getToolChain(), Args, CmdArgs);
 
   Args.AddAllArgs(CmdArgs, options::OPT_T_Group);
   Args.AddAllArgs(CmdArgs, options::OPT_F);
@@ -3317,11 +3393,7 @@ void auroraux::Link::ConstructJob(Compilation &C, const JobAction &JA,
                                 getToolChain().GetFilePath("crtend.o")));
   }
 
-  if (Args.hasArg(options::OPT_fprofile_arcs) ||
-      Args.hasArg(options::OPT_fprofile_generate) ||
-      Args.hasArg(options::OPT_fcreate_profile) ||
-      Args.hasArg(options::OPT_coverage))
-    CmdArgs.push_back("-l:libprofile_rt.a");
+  addProfileRT(getToolChain(), Args, CmdArgs);
 
   const char *Exec =
     Args.MakeArgString(getToolChain().GetProgramPath("ld"));
@@ -3458,6 +3530,8 @@ void freebsd::Assemble::ConstructJob(Compilation &C, const JobAction &JA,
   if (getToolChain().getArchName() == "i386")
     CmdArgs.push_back("--32");
 
+  if (getToolChain().getArchName() == "powerpc")
+    CmdArgs.push_back("-a32");
 
   // Set byte order explicitly
   if (getToolChain().getArchName() == "mips")
@@ -3512,6 +3586,11 @@ void freebsd::Link::ConstructJob(Compilation &C, const JobAction &JA,
   if (getToolChain().getArchName() == "i386") {
     CmdArgs.push_back("-m");
     CmdArgs.push_back("elf_i386_fbsd");
+  }
+
+  if (getToolChain().getArchName() == "powerpc") {
+    CmdArgs.push_back("-m");
+    CmdArgs.push_back("elf32ppc");
   }
 
   if (Output.isFilename()) {
@@ -3622,11 +3701,7 @@ void freebsd::Link::ConstructJob(Compilation &C, const JobAction &JA,
                                                                     "crtn.o")));
   }
 
-  if (Args.hasArg(options::OPT_fprofile_arcs) ||
-      Args.hasArg(options::OPT_fprofile_generate) ||
-      Args.hasArg(options::OPT_fcreate_profile) ||
-      Args.hasArg(options::OPT_coverage))
-    CmdArgs.push_back("-l:libprofile_rt.a");
+  addProfileRT(getToolChain(), Args, CmdArgs);
 
   const char *Exec =
     Args.MakeArgString(getToolChain().GetProgramPath("ld"));
@@ -3746,7 +3821,6 @@ void netbsd::Link::ConstructJob(Compilation &C, const JobAction &JA,
     }
     // FIXME: For some reason GCC passes -lgcc and -lgcc_s before adding
     // the default system libraries. Just mimic this for now.
-    CmdArgs.push_back("-lgcc");
     if (Args.hasArg(options::OPT_static)) {
       CmdArgs.push_back("-lgcc_eh");
     } else {
@@ -3754,6 +3828,7 @@ void netbsd::Link::ConstructJob(Compilation &C, const JobAction &JA,
       CmdArgs.push_back("-lgcc_s");
       CmdArgs.push_back("--no-as-needed");
     }
+    CmdArgs.push_back("-lgcc");
 
     if (Args.hasArg(options::OPT_pthread))
       CmdArgs.push_back("-lpthread");
@@ -3781,11 +3856,7 @@ void netbsd::Link::ConstructJob(Compilation &C, const JobAction &JA,
                                                                     "crtn.o")));
   }
 
-  if (Args.hasArg(options::OPT_fprofile_arcs) ||
-      Args.hasArg(options::OPT_fprofile_generate) ||
-      Args.hasArg(options::OPT_fcreate_profile) ||
-      Args.hasArg(options::OPT_coverage))
-    CmdArgs.push_back("-l:libprofile_rt.a");
+  addProfileRT(getToolChain(), Args, CmdArgs);
 
   const char *Exec = Args.MakeArgString(FindTargetProgramPath(getToolChain(),
                                                       ToolTriple.getTriple(),
@@ -3951,10 +4022,10 @@ void linuxtools::Link::ConstructJob(Compilation &C, const JobAction &JA,
     CmdArgs.push_back("-lm");
   }
 
-  if (Args.hasArg(options::OPT_static))
-    CmdArgs.push_back("--start-group");
-
   if (!Args.hasArg(options::OPT_nostdlib)) {
+    if (Args.hasArg(options::OPT_static))
+      CmdArgs.push_back("--start-group");
+
     if (!D.CCCIsCXX)
       CmdArgs.push_back("-lgcc");
 
@@ -4009,11 +4080,7 @@ void linuxtools::Link::ConstructJob(Compilation &C, const JobAction &JA,
     }
   }
 
-  if (Args.hasArg(options::OPT_fprofile_arcs) ||
-      Args.hasArg(options::OPT_fprofile_generate) ||
-      Args.hasArg(options::OPT_fcreate_profile) ||
-      Args.hasArg(options::OPT_coverage))
-    CmdArgs.push_back("-l:libprofile_rt.a");
+  addProfileRT(getToolChain(), Args, CmdArgs);
 
   if (Args.hasArg(options::OPT_use_gold_plugin)) {
     CmdArgs.push_back("-plugin");
@@ -4097,11 +4164,7 @@ void minix::Link::ConstructJob(Compilation &C, const JobAction &JA,
                                               "/usr/gnu/lib/libend.a")));
   }
 
-  if (Args.hasArg(options::OPT_fprofile_arcs) ||
-      Args.hasArg(options::OPT_fprofile_generate) ||
-      Args.hasArg(options::OPT_fcreate_profile) ||
-      Args.hasArg(options::OPT_coverage))
-    CmdArgs.push_back("-l:libprofile_rt.a");
+  addProfileRT(getToolChain(), Args, CmdArgs);
 
   const char *Exec =
     Args.MakeArgString(getToolChain().GetProgramPath("/usr/gnu/bin/gld"));
@@ -4258,11 +4321,7 @@ void dragonfly::Link::ConstructJob(Compilation &C, const JobAction &JA,
                               getToolChain().GetFilePath("crtn.o")));
   }
 
-  if (Args.hasArg(options::OPT_fprofile_arcs) ||
-      Args.hasArg(options::OPT_fprofile_generate) ||
-      Args.hasArg(options::OPT_fcreate_profile) ||
-      Args.hasArg(options::OPT_coverage))
-    CmdArgs.push_back("-l:libprofile_rt.a");
+  addProfileRT(getToolChain(), Args, CmdArgs);
 
   const char *Exec =
     Args.MakeArgString(getToolChain().GetProgramPath("ld"));

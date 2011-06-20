@@ -134,6 +134,7 @@ static Rdar8595462_A * Rdar8595462_staticVar;
 @interface Rdar8062781
 + (Foo*)getB;
 @property (readonly, nonatomic) Foo *blah;
+@property (readonly, atomic) Foo *abah;
 @end
 
 // RUN: c-index-test -test-annotate-tokens=%s:1:1:118:1 %s -DIBOutlet='__attribute__((iboutlet))' -DIBAction='void)__attribute__((ibaction)' | FileCheck %s
@@ -500,10 +501,10 @@ static Rdar8595462_A * Rdar8595462_staticVar;
 // CHECK: Punctuation: "*" [111:26 - 111:27] ObjCPropertyDecl=foo2:111:27
 // CHECK: Identifier: "foo2" [111:27 - 111:31] ObjCPropertyDecl=foo2:111:27
 
-// CHECK: Punctuation: "@" [115:1 - 115:2] UnexposedDecl=foo:110:33 (Definition)
-// CHECK: Keyword: "synthesize" [115:2 - 115:12] UnexposedDecl=foo:110:33 (Definition)
-// CHECK: Identifier: "foo" [115:13 - 115:16] UnexposedDecl=foo:110:33 (Definition)
-// CHECK: Punctuation: "=" [115:17 - 115:18] UnexposedDecl=foo:110:33 (Definition)
+// CHECK: Punctuation: "@" [115:1 - 115:2] ObjCSynthesizeDecl=foo:110:33 (Definition)
+// CHECK: Keyword: "synthesize" [115:2 - 115:12] ObjCSynthesizeDecl=foo:110:33 (Definition)
+// CHECK: Identifier: "foo" [115:13 - 115:16] ObjCSynthesizeDecl=foo:110:33 (Definition)
+// CHECK: Punctuation: "=" [115:17 - 115:18] ObjCSynthesizeDecl=foo:110:33 (Definition)
 // CHECK: Identifier: "_foo" [115:19 - 115:23] MemberRef=_foo:107:8
 // CHECK: Punctuation: ";" [115:23 - 115:24] ObjCImplementationDecl=Rdar8595386:114:1 (Definition)
 
@@ -526,7 +527,7 @@ static Rdar8595462_A * Rdar8595462_staticVar;
 // CHECK-INSIDE_BLOCK: Punctuation: "=" [128:20 - 128:21] VarDecl=a:128:18 (Definition)
 // CHECK-INSIDE_BLOCK: Identifier: "self" [128:22 - 128:26] DeclRefExpr=self:0:0
 
-// RUN: c-index-test -test-annotate-tokens=%s:134:1:137:1 %s -DIBOutlet='__attribute__((iboutlet))' -DIBAction='void)__attribute__((ibaction)' | FileCheck -check-prefix=CHECK-PROP-AFTER-METHOD %s
+// RUN: c-index-test -test-annotate-tokens=%s:134:1:138:1 %s -DIBOutlet='__attribute__((iboutlet))' -DIBAction='void)__attribute__((ibaction)' | FileCheck -check-prefix=CHECK-PROP-AFTER-METHOD %s
 // CHECK-PROP-AFTER-METHOD: Punctuation: "@" [134:1 - 134:2] ObjCInterfaceDecl=Rdar8062781:134:12
 // CHECK-PROP-AFTER-METHOD: Keyword: "interface" [134:2 - 134:11] ObjCInterfaceDecl=Rdar8062781:134:12
 // CHECK-PROP-AFTER-METHOD: Identifier: "Rdar8062781" [134:12 - 134:23] ObjCInterfaceDecl=Rdar8062781:134:12
@@ -548,4 +549,15 @@ static Rdar8595462_A * Rdar8595462_staticVar;
 // CHECK-PROP-AFTER-METHOD: Punctuation: "*" [136:37 - 136:38] ObjCPropertyDecl=blah:136:38
 // CHECK-PROP-AFTER-METHOD: Identifier: "blah" [136:38 - 136:42] ObjCPropertyDecl=blah:136:38
 // CHECK-PROP-AFTER-METHOD: Punctuation: ";" [136:42 - 136:43] ObjCInterfaceDecl=Rdar8062781:134:12
-// CHECK-PROP-AFTER-METHOD: Punctuation: "@" [137:1 - 137:2] ObjCInterfaceDecl=Rdar8062781:134:12
+// CHECK-PROP-AFTER-METHOD: Punctuation: "@" [137:1 - 137:2] ObjCPropertyDecl=abah:137:35
+// CHECK-PROP-AFTER-METHOD: Keyword: "property" [137:2 - 137:10] ObjCPropertyDecl=abah:137:35
+// CHECK-PROP-AFTER-METHOD: Punctuation: "(" [137:11 - 137:12] ObjCPropertyDecl=abah:137:35
+// CHECK-PROP-AFTER-METHOD: Keyword: "readonly" [137:12 - 137:20] ObjCPropertyDecl=abah:137:35
+// CHECK-PROP-AFTER-METHOD: Punctuation: "," [137:20 - 137:21] ObjCPropertyDecl=abah:137:35
+// CHECK-PROP-AFTER-METHOD: Keyword: "atomic" [137:22 - 137:28] ObjCPropertyDecl=abah:137:35
+// CHECK-PROP-AFTER-METHOD: Punctuation: ")" [137:28 - 137:29] ObjCPropertyDecl=abah:137:35
+// CHECK-PROP-AFTER-METHOD: Identifier: "Foo" [137:30 - 137:33] ObjCClassRef=Foo:1:12
+// CHECK-PROP-AFTER-METHOD: Punctuation: "*" [137:34 - 137:35] ObjCPropertyDecl=abah:137:35
+// CHECK-PROP-AFTER-METHOD: Identifier: "abah" [137:35 - 137:39] ObjCPropertyDecl=abah:137:35
+// CHECK-PROP-AFTER-METHOD: Punctuation: ";" [137:39 - 137:40] ObjCInterfaceDecl=Rdar8062781:134:12
+// CHECK-PROP-AFTER-METHOD: Punctuation: "@" [138:1 - 138:2] ObjCInterfaceDecl=Rdar8062781:134:12

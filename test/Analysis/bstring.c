@@ -1,7 +1,7 @@
-// RUN: %clang_cc1 -analyze -analyzer-checker=core,cplusplus.experimental.CString -analyzer-store=region -Wno-null-dereference -verify %s
-// RUN: %clang_cc1 -analyze -DUSE_BUILTINS -analyzer-checker=core,cplusplus.experimental.CString -analyzer-store=region -Wno-null-dereference -verify %s
-// RUN: %clang_cc1 -analyze -DVARIANT -analyzer-checker=core,cplusplus.experimental.CString -analyzer-store=region -Wno-null-dereference -verify %s
-// RUN: %clang_cc1 -analyze -DUSE_BUILTINS -DVARIANT -analyzer-checker=core,cplusplus.experimental.CString -analyzer-store=region -Wno-null-dereference -verify %s
+// RUN: %clang_cc1 -analyze -analyzer-checker=core,unix.experimental.CString -analyzer-store=region -Wno-null-dereference -verify %s
+// RUN: %clang_cc1 -analyze -DUSE_BUILTINS -analyzer-checker=core,unix.experimental.CString -analyzer-store=region -Wno-null-dereference -verify %s
+// RUN: %clang_cc1 -analyze -DVARIANT -analyzer-checker=core,unix.experimental.CString -analyzer-store=region -Wno-null-dereference -verify %s
+// RUN: %clang_cc1 -analyze -DUSE_BUILTINS -DVARIANT -analyzer-checker=core,unix.experimental.CString -analyzer-store=region -Wno-null-dereference -verify %s
 
 //===----------------------------------------------------------------------===
 // Declarations
@@ -64,14 +64,14 @@ void memcpy1 () {
   char src[] = {1, 2, 3, 4};
   char dst[10];
 
-  memcpy(dst, src, 5); // expected-warning{{Byte string function accesses out-of-bound array element}}
+  memcpy(dst, src, 5); // expected-warning{{Memory copy function accesses out-of-bound array element}}
 }
 
 void memcpy2 () {
   char src[] = {1, 2, 3, 4};
   char dst[1];
 
-  memcpy(dst, src, 4); // expected-warning{{Byte string function overflows destination buffer}}
+  memcpy(dst, src, 4); // expected-warning{{Memory copy function overflows destination buffer}}
 }
 
 void memcpy3 () {
@@ -85,14 +85,14 @@ void memcpy4 () {
   char src[] = {1, 2, 3, 4};
   char dst[10];
 
-  memcpy(dst+2, src+2, 3); // expected-warning{{Byte string function accesses out-of-bound array element}}
+  memcpy(dst+2, src+2, 3); // expected-warning{{Memory copy function accesses out-of-bound array element}}
 }
 
 void memcpy5() {
   char src[] = {1, 2, 3, 4};
   char dst[3];
 
-  memcpy(dst+2, src+2, 2); // expected-warning{{Byte string function overflows destination buffer}}
+  memcpy(dst+2, src+2, 2); // expected-warning{{Memory copy function overflows destination buffer}}
 }
 
 void memcpy6() {
@@ -118,12 +118,12 @@ void memcpy9() {
 
 void memcpy10() {
   char a[4] = {0};
-  memcpy(0, a, 4); // expected-warning{{Null pointer argument in call to byte string function}}
+  memcpy(0, a, 4); // expected-warning{{Null pointer argument in call to memory copy function}}
 }
 
 void memcpy11() {
   char a[4] = {0};
-  memcpy(a, 0, 4); // expected-warning{{Null pointer argument in call to byte string function}}
+  memcpy(a, 0, 4); // expected-warning{{Null pointer argument in call to memory copy function}}
 }
 
 void memcpy12() {
@@ -136,12 +136,37 @@ void memcpy13() {
   memcpy(a, 0, 0); // no-warning
 }
 
+void memcpy_unknown_size (size_t n) {
+  char a[4], b[4] = {1};
+  if (memcpy(a, b, n) != a)
+    (void)*(char*)0; // no-warning
+}
+
+void memcpy_unknown_size_warn (size_t n) {
+  char a[4];
+  if (memcpy(a, 0, n) != a) // expected-warning{{Null pointer argument in call to memory copy function}}
+    (void)*(char*)0; // no-warning
+}
+
 //===----------------------------------------------------------------------===
 // mempcpy()
 //===----------------------------------------------------------------------===
 
+#ifdef VARIANT
+
+#define __mempcpy_chk BUILTIN(__mempcpy_chk)
+void *__mempcpy_chk(void *restrict s1, const void *restrict s2, size_t n,
+                   size_t destlen);
+
+#define mempcpy(a,b,c) __mempcpy_chk(a,b,c,(size_t)-1)
+
+#else /* VARIANT */
+
 #define mempcpy BUILTIN(mempcpy)
 void *mempcpy(void *restrict s1, const void *restrict s2, size_t n);
+
+#endif /* VARIANT */
+
 
 void mempcpy0 () {
   char src[] = {1, 2, 3, 4};
@@ -161,14 +186,14 @@ void mempcpy1 () {
   char src[] = {1, 2, 3, 4};
   char dst[10];
 
-  mempcpy(dst, src, 5); // expected-warning{{Byte string function accesses out-of-bound array element}}
+  mempcpy(dst, src, 5); // expected-warning{{Memory copy function accesses out-of-bound array element}}
 }
 
 void mempcpy2 () {
   char src[] = {1, 2, 3, 4};
   char dst[1];
 
-  mempcpy(dst, src, 4); // expected-warning{{Byte string function overflows destination buffer}}
+  mempcpy(dst, src, 4); // expected-warning{{Memory copy function overflows destination buffer}}
 }
 
 void mempcpy3 () {
@@ -182,14 +207,14 @@ void mempcpy4 () {
   char src[] = {1, 2, 3, 4};
   char dst[10];
 
-  mempcpy(dst+2, src+2, 3); // expected-warning{{Byte string function accesses out-of-bound array element}}
+  mempcpy(dst+2, src+2, 3); // expected-warning{{Memory copy function accesses out-of-bound array element}}
 }
 
 void mempcpy5() {
   char src[] = {1, 2, 3, 4};
   char dst[3];
 
-  mempcpy(dst+2, src+2, 2); // expected-warning{{Byte string function overflows destination buffer}}
+  mempcpy(dst+2, src+2, 2); // expected-warning{{Memory copy function overflows destination buffer}}
 }
 
 void mempcpy6() {
@@ -215,12 +240,12 @@ void mempcpy9() {
 
 void mempcpy10() {
   char a[4] = {0};
-  mempcpy(0, a, 4); // expected-warning{{Null pointer argument in call to byte string function}}
+  mempcpy(0, a, 4); // expected-warning{{Null pointer argument in call to memory copy function}}
 }
 
 void mempcpy11() {
   char a[4] = {0};
-  mempcpy(a, 0, 4); // expected-warning{{Null pointer argument in call to byte string function}}
+  mempcpy(a, 0, 4); // expected-warning{{Null pointer argument in call to memory copy function}}
 }
 
 void mempcpy12() {
@@ -231,6 +256,18 @@ void mempcpy12() {
 void mempcpy13() {
   char a[4] = {0};
   mempcpy(a, 0, 0); // no-warning
+}
+
+void mempcpy_unknown_size_warn (size_t n) {
+  char a[4];
+  if (mempcpy(a, 0, n) != a) // expected-warning{{Null pointer argument in call to memory copy function}}
+    (void)*(char*)0; // no-warning
+}
+
+void mempcpy_unknownable_size (char *src, float n) {
+  char a[4];
+  // This used to crash because we don't model floats.
+  mempcpy(a, src, (size_t)n);
 }
 
 //===----------------------------------------------------------------------===

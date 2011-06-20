@@ -508,6 +508,7 @@ public:
   Value *VisitObjCStringLiteral(const ObjCStringLiteral *E) {
     return CGF.EmitObjCStringLiteral(E);
   }
+  Value *VisitAsTypeExpr(AsTypeExpr *CE);
 };
 }  // end anonymous namespace.
 
@@ -1105,7 +1106,12 @@ Value *ScalarExprEmitter::EmitCastExpr(CastExpr *CE) {
     // function pointers on Itanium and ARM).
     return CGF.CGM.getCXXABI().EmitMemberPointerConversion(CGF, CE, Src);
   }
-  
+
+  case CK_ObjCProduceObject:
+    return CGF.EmitARCRetainScalarExpr(E);
+  case CK_ObjCConsumeObject:
+    return CGF.EmitObjCConsumeObject(E->getType(), Visit(E));
+
   case CK_FloatingRealToComplex:
   case CK_FloatingComplexCast:
   case CK_IntegralRealToComplex:
@@ -2227,20 +2233,42 @@ Value *ScalarExprEmitter::EmitCompare(const BinaryOperator *E,unsigned UICmpOpc,
 Value *ScalarExprEmitter::VisitBinAssign(const BinaryOperator *E) {
   bool Ignore = TestAndClearIgnoreResultAssign();
 
-  // __block variables need to have the rhs evaluated first, plus this should
-  // improve codegen just a little.
-  Value *RHS = Visit(E->getRHS());
-  LValue LHS = EmitCheckedLValue(E->getLHS());
+  Value *RHS;
+  LValue LHS;
 
-  // Store the value into the LHS.  Bit-fields are handled specially
-  // because the result is altered by the store, i.e., [C99 6.5.16p1]
-  // 'An assignment expression has the value of the left operand after
-  // the assignment...'.
-  if (LHS.isBitField())
-    CGF.EmitStoreThroughBitfieldLValue(RValue::get(RHS), LHS, E->getType(),
-                                       &RHS);
-  else
-    CGF.EmitStoreThroughLValue(RValue::get(RHS), LHS, E->getType());
+  switch (E->getLHS()->getType().getObjCLifetime()) {
+  case Qualifiers::OCL_Strong:
+    llvm::tie(LHS, RHS) = CGF.EmitARCStoreStrong(E, Ignore);
+    break;
+
+  case Qualifiers::OCL_Autoreleasing:
+    llvm::tie(LHS,RHS) = CGF.EmitARCStoreAutoreleasing(E);
+    break;
+
+  case Qualifiers::OCL_Weak:
+    RHS = Visit(E->getRHS());
+    LHS = EmitCheckedLValue(E->getLHS());    
+    RHS = CGF.EmitARCStoreWeak(LHS.getAddress(), RHS, Ignore);
+    break;
+
+  // No reason to do any of these differently.
+  case Qualifiers::OCL_None:
+  case Qualifiers::OCL_ExplicitNone:
+    // __block variables need to have the rhs evaluated first, plus
+    // this should improve codegen just a little.
+    RHS = Visit(E->getRHS());
+    LHS = EmitCheckedLValue(E->getLHS());
+
+    // Store the value into the LHS.  Bit-fields are handled specially
+    // because the result is altered by the store, i.e., [C99 6.5.16p1]
+    // 'An assignment expression has the value of the left operand after
+    // the assignment...'.
+    if (LHS.isBitField())
+      CGF.EmitStoreThroughBitfieldLValue(RValue::get(RHS), LHS, E->getType(),
+                                         &RHS);
+    else
+      CGF.EmitStoreThroughLValue(RValue::get(RHS), LHS, E->getType());
+  }
 
   // If the result is clearly ignored, return now.
   if (Ignore)
@@ -2543,6 +2571,56 @@ Value *ScalarExprEmitter::VisitVAArgExpr(VAArgExpr *VE) {
 
 Value *ScalarExprEmitter::VisitBlockExpr(const BlockExpr *block) {
   return CGF.EmitBlockLiteral(block);
+}
+
+Value *ScalarExprEmitter::VisitAsTypeExpr(AsTypeExpr *E) {
+  Value *Src  = CGF.EmitScalarExpr(E->getSrcExpr());
+  const llvm::Type * DstTy = ConvertType(E->getDstType());
+  
+  // Going from vec4->vec3 or vec3->vec4 is a special case and requires
+  // a shuffle vector instead of a bitcast.
+  const llvm::Type *SrcTy = Src->getType();
+  if (isa<llvm::VectorType>(DstTy) && isa<llvm::VectorType>(SrcTy)) {
+    unsigned numElementsDst = cast<llvm::VectorType>(DstTy)->getNumElements();
+    unsigned numElementsSrc = cast<llvm::VectorType>(SrcTy)->getNumElements();
+    if ((numElementsDst == 3 && numElementsSrc == 4) 
+        || (numElementsDst == 4 && numElementsSrc == 3)) {
+      
+      
+      // In the case of going from int4->float3, a bitcast is needed before
+      // doing a shuffle.
+      const llvm::Type *srcElemTy = 
+      cast<llvm::VectorType>(SrcTy)->getElementType();
+      const llvm::Type *dstElemTy = 
+      cast<llvm::VectorType>(DstTy)->getElementType();
+      
+      if ((srcElemTy->isIntegerTy() && dstElemTy->isFloatTy())
+          || (srcElemTy->isFloatTy() && dstElemTy->isIntegerTy())) {
+        // Create a float type of the same size as the source or destination.
+        const llvm::VectorType *newSrcTy = llvm::VectorType::get(dstElemTy,
+                                                                 numElementsSrc);
+        
+        Src = Builder.CreateBitCast(Src, newSrcTy, "astypeCast");
+      }
+      
+      llvm::Value *UnV = llvm::UndefValue::get(Src->getType());
+      
+      llvm::SmallVector<llvm::Constant*, 3> Args;
+      Args.push_back(Builder.getInt32(0));
+      Args.push_back(Builder.getInt32(1));
+      Args.push_back(Builder.getInt32(2));
+ 
+      if (numElementsDst == 4)
+        Args.push_back(llvm::UndefValue::get(
+                                             llvm::Type::getInt32Ty(CGF.getLLVMContext())));
+      
+      llvm::Constant *Mask = llvm::ConstantVector::get(Args);
+      
+      return Builder.CreateShuffleVector(Src, UnV, Mask, "astype");
+    }
+  }
+  
+  return Builder.CreateBitCast(Src, DstTy, "astype");
 }
 
 //===----------------------------------------------------------------------===//

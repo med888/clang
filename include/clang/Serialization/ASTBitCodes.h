@@ -367,7 +367,12 @@ namespace clang {
       OPENCL_EXTENSIONS = 43,
 
       /// \brief The list of delegating constructor declarations.
-      DELEGATING_CTORS = 44
+      DELEGATING_CTORS = 44,
+
+      /// \brief Record code for the table of offsets into the block
+      /// of file source-location information.
+      FILE_SOURCE_LOCATION_OFFSETS = 45
+
     };
 
     /// \brief Record types used within a source manager block.
@@ -508,6 +513,9 @@ namespace clang {
     /// Type IDs for non-predefined types will start at
     /// NUM_PREDEF_TYPE_IDs.
     const unsigned NUM_PREDEF_TYPE_IDS = 100;
+
+    /// \brief The number of allowed abbreviations in bits
+    const unsigned NUM_ALLOWED_ABBREVS_SIZE = 4;
 
     /// \brief Record codes for each kind of type.
     ///
@@ -914,6 +922,8 @@ namespace clang {
       EXPR_OBJC_MESSAGE_EXPR,
       /// \brief An ObjCIsa Expr record.
       EXPR_OBJC_ISA,
+      /// \breif An ObjCIndirectCopyRestoreExpr record.
+      EXPR_OBJC_INDIRECT_COPY_RESTORE,
 
       /// \brief An ObjCForCollectionStmt record.
       STMT_OBJC_FOR_COLLECTION,
@@ -927,6 +937,8 @@ namespace clang {
       STMT_OBJC_AT_SYNCHRONIZED,
       /// \brief An ObjCAtThrowStmt record.
       STMT_OBJC_AT_THROW,
+      /// \brief An ObjCAutoreleasePoolStmt record.
+      STMT_OBJC_AUTORELEASE_POOL,
 
       // C++
       
@@ -994,8 +1006,13 @@ namespace clang {
       EXPR_SUBST_NON_TYPE_TEMPLATE_PARM_PACK,// SubstNonTypeTemplateParmPackExpr
 
       // CUDA
+      EXPR_CUDA_KERNEL_CALL,       // CUDAKernelCallExpr      
 
-      EXPR_CUDA_KERNEL_CALL       // CUDAKernelCallExpr
+      // OpenCL
+      EXPR_ASTYPE,                 // AsTypeExpr
+      
+      // ARC
+      EXPR_OBJC_BRIDGED_CAST       // ObjCBridgedCastExpr
     };
 
     /// \brief The kinds of designators that can occur in a

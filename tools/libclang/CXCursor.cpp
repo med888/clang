@@ -92,6 +92,7 @@ CXCursor cxcursor::MakeCXCursor(Stmt *S, Decl *Parent,
   case Stmt::ObjCAtFinallyStmtClass:    
   case Stmt::ObjCAtThrowStmtClass:      
   case Stmt::ObjCAtSynchronizedStmtClass: 
+  case Stmt::ObjCAutoreleasePoolStmtClass:    
   case Stmt::ObjCForCollectionStmtClass:
   case Stmt::CXXCatchStmtClass:
   case Stmt::CXXTryStmtClass:  
@@ -167,12 +168,15 @@ CXCursor cxcursor::MakeCXCursor(Stmt *S, Decl *Parent,
   case Stmt::ObjCEncodeExprClass:       
   case Stmt::ObjCSelectorExprClass:   
   case Stmt::ObjCProtocolExprClass:   
-  case Stmt::ObjCIsaExprClass:       
+  case Stmt::ObjCIsaExprClass:   
+  case Stmt::ObjCIndirectCopyRestoreExprClass:
+  case Stmt::ObjCBridgedCastExprClass:
   case Stmt::ShuffleVectorExprClass: 
   case Stmt::BlockExprClass:  
   case Stmt::OpaqueValueExprClass:
   case Stmt::PackExpansionExprClass:
   case Stmt::SizeOfPackExprClass:
+  case Stmt::AsTypeExprClass:
     K = CXCursor_UnexposedExpr;
     break;
       

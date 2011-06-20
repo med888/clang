@@ -1594,8 +1594,7 @@ GetX86_64ByValArgumentPair(const llvm::Type *Lo, const llvm::Type *Hi,
     }
   }
 
-  const llvm::StructType *Result =
-    llvm::StructType::get(Lo->getContext(), Lo, Hi, NULL);
+  const llvm::StructType *Result = llvm::StructType::get(Lo, Hi, NULL);
 
 
   // Verify that the second element is at an 8-byte offset.
@@ -1671,8 +1670,7 @@ classifyReturnType(QualType RetTy) const {
     // %st1.
   case ComplexX87:
     assert(Hi == ComplexX87 && "Unexpected ComplexX87 classification.");
-    ResType = llvm::StructType::get(getVMContext(),
-                                    llvm::Type::getX86_FP80Ty(getVMContext()),
+    ResType = llvm::StructType::get(llvm::Type::getX86_FP80Ty(getVMContext()),
                                     llvm::Type::getX86_FP80Ty(getVMContext()),
                                     NULL);
     break;
@@ -2062,7 +2060,7 @@ llvm::Value *X86_64ABIInfo::EmitVAArg(llvm::Value *VAListAddr, QualType Ty,
     const llvm::Type *DoubleTy = llvm::Type::getDoubleTy(VMContext);
     const llvm::Type *DblPtrTy =
       llvm::PointerType::getUnqual(DoubleTy);
-    const llvm::StructType *ST = llvm::StructType::get(VMContext, DoubleTy,
+    const llvm::StructType *ST = llvm::StructType::get(DoubleTy,
                                                        DoubleTy, NULL);
     llvm::Value *V, *Tmp = CGF.CreateTempAlloca(ST);
     V = CGF.Builder.CreateLoad(CGF.Builder.CreateBitCast(RegAddrLo,
@@ -2277,6 +2275,10 @@ public:
     return 13;
   }
 
+  llvm::StringRef getARCRetainAutoreleasedReturnValueMarker() const {
+    return "mov\tr7, r7\t\t@ marker for objc_retainAutoreleaseReturnValue";
+  }
+
   bool initDwarfEHRegSizeTable(CodeGen::CodeGenFunction &CGF,
                                llvm::Value *Address) const {
     CodeGen::CGBuilderTy &Builder = CGF.Builder;
@@ -2290,8 +2292,6 @@ public:
 
     return false;
   }
-
-
 };
 
 }
@@ -2372,8 +2372,7 @@ ABIArgInfo ARMABIInfo::classifyArgumentType(QualType Ty) const {
   }
 
   const llvm::Type *STy =
-    llvm::StructType::get(getVMContext(),
-                          llvm::ArrayType::get(ElemTy, SizeRegs), NULL, NULL);
+    llvm::StructType::get(llvm::ArrayType::get(ElemTy, SizeRegs), NULL);
   return ABIArgInfo::getDirect(STy);
 }
 
@@ -2858,10 +2857,21 @@ void MSP430TargetCodeGenInfo::SetTargetAttributes(const Decl *D,
 //===----------------------------------------------------------------------===//
 
 namespace {
+class MipsABIInfo : public ABIInfo {
+public:
+  MipsABIInfo(CodeGenTypes &CGT) : ABIInfo(CGT) {}
+
+  ABIArgInfo classifyReturnType(QualType RetTy) const;
+  ABIArgInfo classifyArgumentType(QualType RetTy) const;
+  virtual void computeInfo(CGFunctionInfo &FI) const;
+  virtual llvm::Value *EmitVAArg(llvm::Value *VAListAddr, QualType Ty,
+                                 CodeGenFunction &CGF) const;
+};
+
 class MIPSTargetCodeGenInfo : public TargetCodeGenInfo {
 public:
   MIPSTargetCodeGenInfo(CodeGenTypes &CGT)
-    : TargetCodeGenInfo(new DefaultABIInfo(CGT)) {}
+    : TargetCodeGenInfo(new MipsABIInfo(CGT)) {}
 
   int getDwarfEHStackPointer(CodeGen::CodeGenModule &CGM) const {
     return 29;
@@ -2870,6 +2880,54 @@ public:
   bool initDwarfEHRegSizeTable(CodeGen::CodeGenFunction &CGF,
                                llvm::Value *Address) const;
 };
+}
+
+ABIArgInfo MipsABIInfo::classifyArgumentType(QualType Ty) const {
+  if (isAggregateTypeForABI(Ty)) {
+    // Ignore empty aggregates.
+    if (getContext().getTypeSize(Ty) == 0)
+      return ABIArgInfo::getIgnore();
+
+    return ABIArgInfo::getIndirect(0);
+  }
+
+  // Treat an enum type as its underlying type.
+  if (const EnumType *EnumTy = Ty->getAs<EnumType>())
+    Ty = EnumTy->getDecl()->getIntegerType();
+
+  return (Ty->isPromotableIntegerType() ?
+          ABIArgInfo::getExtend() : ABIArgInfo::getDirect());
+}
+
+ABIArgInfo MipsABIInfo::classifyReturnType(QualType RetTy) const {
+  if (RetTy->isVoidType())
+    return ABIArgInfo::getIgnore();
+
+  if (isAggregateTypeForABI(RetTy)) {
+    if (RetTy->isAnyComplexType())
+      return ABIArgInfo::getDirect();
+
+    return ABIArgInfo::getIndirect(0);
+  }
+
+  // Treat an enum type as its underlying type.
+  if (const EnumType *EnumTy = RetTy->getAs<EnumType>())
+    RetTy = EnumTy->getDecl()->getIntegerType();
+
+  return (RetTy->isPromotableIntegerType() ?
+          ABIArgInfo::getExtend() : ABIArgInfo::getDirect());
+}
+
+void MipsABIInfo::computeInfo(CGFunctionInfo &FI) const {
+  FI.getReturnInfo() = classifyReturnType(FI.getReturnType());
+  for (CGFunctionInfo::arg_iterator it = FI.arg_begin(), ie = FI.arg_end();
+       it != ie; ++it)
+    it->info = classifyArgumentType(it->type);
+}
+
+llvm::Value* MipsABIInfo::EmitVAArg(llvm::Value *VAListAddr, QualType Ty,
+                                    CodeGenFunction &CGF) const {
+  return 0;
 }
 
 bool

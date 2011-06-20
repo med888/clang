@@ -30,6 +30,7 @@ namespace clang {
 
   public:
     serialization::StmtCode Code;
+    unsigned AbbrevToUse;
 
     ASTStmtWriter(ASTWriter &Writer, ASTWriter::RecordData &Record)
       : Writer(Writer), Record(Record) { }
@@ -104,6 +105,8 @@ namespace clang {
     void VisitObjCPropertyRefExpr(ObjCPropertyRefExpr *E);
     void VisitObjCMessageExpr(ObjCMessageExpr *E);
     void VisitObjCIsaExpr(ObjCIsaExpr *E);
+    void VisitObjCIndirectCopyRestoreExpr(ObjCIndirectCopyRestoreExpr *E);
+    void VisitObjCBridgedCastExpr(ObjCBridgedCastExpr *E);
 
     // Objective-C Statements
     void VisitObjCForCollectionStmt(ObjCForCollectionStmt *);
@@ -112,6 +115,7 @@ namespace clang {
     void VisitObjCAtTryStmt(ObjCAtTryStmt *);
     void VisitObjCAtSynchronizedStmt(ObjCAtSynchronizedStmt *);
     void VisitObjCAtThrowStmt(ObjCAtThrowStmt *);
+    void VisitObjCAutoreleasePoolStmt(ObjCAutoreleasePoolStmt *);
 
     // C++ Statements
     void VisitCXXCatchStmt(CXXCatchStmt *S);
@@ -164,6 +168,8 @@ namespace clang {
 
     // CUDA Expressions
     void VisitCUDAKernelCallExpr(CUDAKernelCallExpr *E);
+    
+    void VisitAsTypeExpr(AsTypeExpr *E);
   };
 }
 
@@ -392,6 +398,14 @@ void ASTStmtWriter::VisitDeclRefExpr(DeclRefExpr *E) {
     Record.push_back(NumTemplateArgs);
   }
 
+  DeclarationName::NameKind nk = (E->getDecl()->getDeclName().getNameKind());
+
+  if ((!E->hasExplicitTemplateArgs()) && (!E->hasQualifier()) &&
+      (E->getDecl() == E->getFoundDecl()) &&
+      nk == DeclarationName::Identifier) {
+    AbbrevToUse = Writer.getDeclRefExprAbbrev();
+  }
+
   if (E->hasQualifier())
     Writer.AddNestedNameSpecifierLoc(E->getQualifierLoc(), Record);
 
@@ -411,6 +425,11 @@ void ASTStmtWriter::VisitIntegerLiteral(IntegerLiteral *E) {
   VisitExpr(E);
   Writer.AddSourceLocation(E->getLocation(), Record);
   Writer.AddAPInt(E->getValue(), Record);
+
+  if (E->getValue().getBitWidth() == 32) {
+    AbbrevToUse = Writer.getIntegerLiteralAbbrev();
+  }
+
   Code = serialization::EXPR_INTEGER_LITERAL;
 }
 
@@ -449,6 +468,9 @@ void ASTStmtWriter::VisitCharacterLiteral(CharacterLiteral *E) {
   Record.push_back(E->getValue());
   Writer.AddSourceLocation(E->getLocation(), Record);
   Record.push_back(E->isWide());
+
+  AbbrevToUse = Writer.getCharacterLiteralAbbrev();
+
   Code = serialization::EXPR_CHARACTER_LITERAL;
 }
 
@@ -585,6 +607,22 @@ void ASTStmtWriter::VisitObjCIsaExpr(ObjCIsaExpr *E) {
   Writer.AddSourceLocation(E->getIsaMemberLoc(), Record);
   Record.push_back(E->isArrow());
   Code = serialization::EXPR_OBJC_ISA;
+}
+
+void ASTStmtWriter::
+VisitObjCIndirectCopyRestoreExpr(ObjCIndirectCopyRestoreExpr *E) {
+  VisitExpr(E);
+  Writer.AddStmt(E->getSubExpr());
+  Record.push_back(E->shouldCopy());
+  Code = serialization::EXPR_OBJC_INDIRECT_COPY_RESTORE;
+}
+
+void ASTStmtWriter::VisitObjCBridgedCastExpr(ObjCBridgedCastExpr *E) {
+  VisitExplicitCastExpr(E);
+  Writer.AddSourceLocation(E->getLParenLoc(), Record);
+  Writer.AddSourceLocation(E->getBridgeKeywordLoc(), Record);
+  Record.push_back(E->getBridgeKind()); // FIXME: Stable encoding
+  Code = serialization::EXPR_OBJC_BRIDGED_CAST;
 }
 
 void ASTStmtWriter::VisitCastExpr(CastExpr *E) {
@@ -895,6 +933,7 @@ void ASTStmtWriter::VisitObjCPropertyRefExpr(ObjCPropertyRefExpr *E) {
 void ASTStmtWriter::VisitObjCMessageExpr(ObjCMessageExpr *E) {
   VisitExpr(E);
   Record.push_back(E->getNumArgs());
+  Record.push_back(E->isDelegateInitCall());
   Record.push_back((unsigned)E->getReceiverKind()); // FIXME: stable encoding
   switch (E->getReceiverKind()) {
   case ObjCMessageExpr::Instance:
@@ -952,6 +991,12 @@ void ASTStmtWriter::VisitObjCAtFinallyStmt(ObjCAtFinallyStmt *S) {
   Writer.AddStmt(S->getFinallyBody());
   Writer.AddSourceLocation(S->getAtFinallyLoc(), Record);
   Code = serialization::STMT_OBJC_FINALLY;
+}
+
+void ASTStmtWriter::VisitObjCAutoreleasePoolStmt(ObjCAutoreleasePoolStmt *S) {
+  Writer.AddStmt(S->getSubStmt());
+  Writer.AddSourceLocation(S->getAtLoc(), Record);
+  Code = serialization::STMT_OBJC_AUTORELEASE_POOL;
 }
 
 void ASTStmtWriter::VisitObjCAtTryStmt(ObjCAtTryStmt *S) {
@@ -1416,6 +1461,15 @@ void ASTStmtWriter::VisitCUDAKernelCallExpr(CUDAKernelCallExpr *E) {
 }
 
 //===----------------------------------------------------------------------===//
+// OpenCL Expressions and Statements.
+//===----------------------------------------------------------------------===//
+void ASTStmtWriter::VisitAsTypeExpr(AsTypeExpr *E) {
+  VisitExpr(E);
+  Writer.AddStmt(E->getSrcExpr());
+  Code = serialization::EXPR_ASTYPE;
+}
+
+//===----------------------------------------------------------------------===//
 // ASTWriter Implementation
 //===----------------------------------------------------------------------===//
 
@@ -1460,6 +1514,7 @@ void ASTWriter::WriteSubStmt(Stmt *S) {
   CollectedStmts = &SubStmts;
 
   Writer.Code = serialization::STMT_NULL_PTR;
+  Writer.AbbrevToUse = 0;
   Writer.Visit(S);
   
 #ifndef NDEBUG
@@ -1481,7 +1536,7 @@ void ASTWriter::WriteSubStmt(Stmt *S) {
   while (!SubStmts.empty())
     WriteSubStmt(SubStmts.pop_back_val());
   
-  Stream.EmitRecord(Writer.Code, Record);
+  Stream.EmitRecord(Writer.Code, Record, Writer.AbbrevToUse);
 }
 
 /// \brief Flush all of the statements that have been added to the

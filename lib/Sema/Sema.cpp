@@ -143,7 +143,7 @@ Sema::Sema(Preprocessor &pp, ASTContext &ctxt, ASTConsumer &consumer,
     Diags(PP.getDiagnostics()), SourceMgr(PP.getSourceManager()),
     ExternalSource(0), CodeCompleter(CodeCompleter), CurContext(0), 
     PackContext(0), MSStructPragmaOn(false), VisContext(0),
-    LateTemplateParser(0), OpaqueParser(0),
+    ExprNeedsCleanups(0), LateTemplateParser(0), OpaqueParser(0),
     IdResolver(pp.getLangOptions()), CXXTypeInfoDecl(0), MSVCGuidDecl(0),
     GlobalNewDeleteDeclared(false), 
     CompleteTranslationUnit(CompleteTranslationUnit),
@@ -162,7 +162,7 @@ Sema::Sema(Preprocessor &pp, ASTContext &ctxt, ASTConsumer &consumer,
                                        &Context);
 
   ExprEvalContexts.push_back(
-                  ExpressionEvaluationContextRecord(PotentiallyEvaluated, 0));  
+        ExpressionEvaluationContextRecord(PotentiallyEvaluated, 0, false));
 
   FunctionScopes.push_back(new FunctionScopeInfo(Diags));
 }
@@ -202,6 +202,32 @@ Sema::~Sema() {
     ExternalSema->ForgetSema();
 }
 
+
+/// makeUnavailableInSystemHeader - There is an error in the current
+/// context.  If we're still in a system header, and we can plausibly
+/// make the relevant declaration unavailable instead of erroring, do
+/// so and return true.
+bool Sema::makeUnavailableInSystemHeader(SourceLocation loc,
+                                         llvm::StringRef msg) {
+  // If we're not in a function, it's an error.
+  FunctionDecl *fn = dyn_cast<FunctionDecl>(CurContext);
+  if (!fn) return false;
+
+  // If we're in template instantiation, it's an error.
+  if (!ActiveTemplateInstantiations.empty())
+    return false;
+  
+  // If that function's not in a system header, it's an error.
+  if (!Context.getSourceManager().isInSystemHeader(loc))
+    return false;
+
+  // If the function is already unavailable, it's not an error.
+  if (fn->hasAttr<UnavailableAttr>()) return true;
+
+  fn->addAttr(new (Context) UnavailableAttr(loc, Context, msg));
+  return true;
+}
+
 ASTMutationListener *Sema::getASTMutationListener() const {
   return getASTConsumer().GetASTMutationListener();
 }
@@ -211,12 +237,16 @@ ASTMutationListener *Sema::getASTMutationListener() const {
 /// The result is of the given category.
 ExprResult Sema::ImpCastExprToType(Expr *E, QualType Ty,
                                    CastKind Kind, ExprValueKind VK,
-                                   const CXXCastPath *BasePath) {
+                                   const CXXCastPath *BasePath,
+                                   CheckedConversionKind CCK) {
   QualType ExprTy = Context.getCanonicalType(E->getType());
   QualType TypeTy = Context.getCanonicalType(Ty);
 
   if (ExprTy == TypeTy)
     return Owned(E);
+
+  if (getLangOptions().ObjCAutoRefCount)
+    CheckObjCARCConversion(SourceRange(), Ty, E, CCK);
 
   // If this is a derived-to-base cast to a through a virtual base, we
   // need a vtable.
@@ -378,30 +408,22 @@ void Sema::ActOnEndOfTranslationUnit() {
       }
     }
 
-    bool SomethingChanged;
-    do {
-      SomethingChanged = false;
-      
-      // If DefinedUsedVTables ends up marking any virtual member functions it
-      // might lead to more pending template instantiations, which we then need
-      // to instantiate.
-      if (DefineUsedVTables())
-        SomethingChanged = true;
+    // If DefinedUsedVTables ends up marking any virtual member functions it
+    // might lead to more pending template instantiations, which we then need
+    // to instantiate.
+    DefineUsedVTables();
 
-      // C++: Perform implicit template instantiations.
-      //
-      // FIXME: When we perform these implicit instantiations, we do not
-      // carefully keep track of the point of instantiation (C++ [temp.point]).
-      // This means that name lookup that occurs within the template
-      // instantiation will always happen at the end of the translation unit,
-      // so it will find some names that should not be found. Although this is
-      // common behavior for C++ compilers, it is technically wrong. In the
-      // future, we either need to be able to filter the results of name lookup
-      // or we need to perform template instantiations earlier.
-      if (PerformPendingInstantiations())
-        SomethingChanged = true;
-      
-    } while (SomethingChanged);
+    // C++: Perform implicit template instantiations.
+    //
+    // FIXME: When we perform these implicit instantiations, we do not
+    // carefully keep track of the point of instantiation (C++ [temp.point]).
+    // This means that name lookup that occurs within the template
+    // instantiation will always happen at the end of the translation unit,
+    // so it will find some names that should not be found. Although this is
+    // common behavior for C++ compilers, it is technically wrong. In the
+    // future, we either need to be able to filter the results of name lookup
+    // or we need to perform template instantiations earlier.
+    PerformPendingInstantiations();
   }
   
   // Remove file scoped decls that turned out to be used.
@@ -737,8 +759,8 @@ void Sema::PopFunctionOrBlockScope(const AnalysisBasedWarnings::Policy *WP,
 
 /// \brief Determine whether any errors occurred within this function/method/
 /// block.
-bool Sema::hasAnyErrorsInThisFunction() const {
-  return getCurFunction()->ErrorTrap.hasErrorOccurred();
+bool Sema::hasAnyUnrecoverableErrorsInThisFunction() const {
+  return getCurFunction()->ErrorTrap.hasUnrecoverableErrorOccurred();
 }
 
 BlockScopeInfo *Sema::getCurBlock() {

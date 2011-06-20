@@ -695,9 +695,16 @@ llvm::Value *CGObjCCocotron::GetSelector(CGBuilderTy &Builder, Selector Sel,
         return SelValue;
     */
     
+    
+   /* llvm::Constant *Idxs[] = {Zeros[0],
+        llvm::ConstantInt::get(llvm::Type::getInt32Ty(VMContext), 0), Zeros[0]};
+    
+    // FIXME: We're generating redundant loads and stores here!
+    llvm::Constant *SelPtr = llvm::ConstantExpr::getGetElementPtr(SelectorList,
+                                                                  Idxs, 2);*/
        
-        llvm::Value *selectorString = CGM.GetAddrOfConstantCString(Sel.getAsString());
-        selectorString = Builder.CreateStructGEP(selectorString, 0);
+        return  CGM.GetAddrOfConstantCString(Sel.getAsString());
+        /*selectorString = Builder.CreateStructGEP(selectorString, 0);
         
         std::vector<const llvm::Type*> Params(1, PtrToInt8Ty);
         llvm::Constant *sel_getUidFn =
@@ -705,7 +712,7 @@ llvm::Value *CGObjCCocotron::GetSelector(CGBuilderTy &Builder, Selector Sel,
                                                           Params,
                                                           true),
                                                           "sel_getUid");
-        return Builder.CreateCall(sel_getUidFn, selectorString);
+        return Builder.CreateCall(sel_getUidFn, selectorString);*/
 
 }
 
