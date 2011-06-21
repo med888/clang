@@ -677,46 +677,48 @@ llvm::Value *CGObjCCocotron::GetClass(CGBuilderTy &Builder,
 
 llvm::Value *CGObjCCocotron::GetSelector(CGBuilderTy &Builder, Selector Sel,
                                     const std::string &TypeEncoding, bool lval) {
-        llvm::GlobalAlias *&SelValue =  SelectorTable[Sel];
-
-        if (0 == SelValue) {
-            SelValue = new llvm::GlobalAlias(PtrToInt8Ty,
-                                             llvm::GlobalValue::PrivateLinkage,
-                                             ".objc_selector_alias_"+Sel.getAsString(), NULL,
-                                             &TheModule);
-        }
+    llvm::GlobalAlias *&SelValue =  SelectorTable[Sel];
     
-        //TODO FIX IT
+    if (0 == SelValue) {
+        SelValue = new llvm::GlobalAlias(PtrToInt8Ty,
+                                        llvm::GlobalValue::PrivateLinkage,
+                                         ".objc_selector_alias_"+Sel.getAsString(), NULL,
+                                         &TheModule);
+        
+    }
+    
+    
+    
+    //TODO FIX IT
+    
+    
     
     /*
-       if (lval) {
-            llvm::Value *tmp = Builder.CreateAlloca(SelValue->getType());
-            Builder.CreateStore(SelValue, tmp);
-            return tmp;
-        }
-
-        return SelValue;
-    */
+     if (lval) {
+     llvm::Value *tmp = Builder.CreateAlloca(SelValue->getType());
+     Builder.CreateStore(SelValue, tmp);
+     return tmp;
+     }
+     
+     
+     return SelValue;
+     */
     
     
-   /* llvm::Constant *Idxs[] = {Zeros[0],
-        llvm::ConstantInt::get(llvm::Type::getInt32Ty(VMContext), 0), Zeros[0]};
     
-    // FIXME: We're generating redundant loads and stores here!
-    llvm::Constant *SelPtr = llvm::ConstantExpr::getGetElementPtr(SelectorList,
-                                                                  Idxs, 2);*/
-       
-        return  CGM.GetAddrOfConstantCString(Sel.getAsString());
-        /*selectorString = Builder.CreateStructGEP(selectorString, 0);
-        
-        std::vector<const llvm::Type*> Params(1, PtrToInt8Ty);
-        llvm::Constant *sel_getUidFn =
-        CGM.CreateRuntimeFunction(llvm::FunctionType::get(IdTy,
-                                                          Params,
-                                                          true),
-                                                          "sel_getUid");
-        return Builder.CreateCall(sel_getUidFn, selectorString);*/
-
+    
+    
+    llvm::Value *selectorString = CGM.GetAddrOfConstantCString(Sel.getAsString());
+    selectorString = Builder.CreateStructGEP(selectorString, 0);
+    
+    std::vector<const llvm::Type*> Params(1, PtrToInt8Ty);
+    llvm::Constant *sel_getUidFn =
+    CGM.CreateRuntimeFunction(llvm::FunctionType::get(IdTy,
+                                                      Params,
+                                                      true),
+                                                "sel_getUid");
+    
+    return Builder.CreateCall(sel_getUidFn, selectorString);
 }
 
 llvm::Value *CGObjCCocotron::GetSelector(CGBuilderTy &Builder, Selector Sel,
