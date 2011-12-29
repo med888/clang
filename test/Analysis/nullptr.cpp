@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -std=c++0x -analyze -analyzer-checker=core -analyzer-store region -verify %s
+// RUN: %clang_cc1 -std=c++11 -analyze -analyzer-checker=core -analyzer-store region -verify %s
 
 // test to see if nullptr is detected as a null pointer
 void foo1(void) {
@@ -37,5 +37,13 @@ void foo4(void) {
   char  *cp = 0;
   if (np != cp)
     *np = 0;  // no-warning
+}
+
+
+int pr10372(void *& x) {
+  // GNU null is a pointer-sized integer, not a pointer.
+  x = __null;
+  // This used to crash.
+  return __null;
 }
 

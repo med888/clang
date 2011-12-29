@@ -1,11 +1,11 @@
-// RUN: %clang_cc1 -triple x86_64-apple-darwin11 -fobjc-nonfragile-abi -fsyntax-only -fobjc-arc -verify %s
+// RUN: %clang_cc1 -triple x86_64-apple-darwin11 -fobjc-runtime-has-weak -fsyntax-only -fobjc-arc -verify %s
 // rdar://9340606
 
 @interface Foo {
 @public
     id __unsafe_unretained x;
     id __weak y;
-    id __autoreleasing z; // expected-error {{ivars cannot have __autoreleasing lifetime}}
+    id __autoreleasing z; // expected-error {{ivars cannot have __autoreleasing ownership}}
 }
 @property(strong) id x; // expected-note {{property declared here}}
 @property(strong) id y; // expected-note {{property declared here}}
@@ -22,7 +22,7 @@
 @public
     id __unsafe_unretained x;
     id __weak y;
-    id __autoreleasing z; // expected-error {{ivars cannot have __autoreleasing lifetime}}
+    id __autoreleasing z; // expected-error {{ivars cannot have __autoreleasing ownership}}
 }
 @property(retain) id x; // expected-note {{property declared here}}
 @property(retain) id y; // expected-note {{property declared here}}
@@ -39,7 +39,7 @@
 @public
     id __unsafe_unretained x;
     id __weak y;
-    id __autoreleasing z; // expected-error {{ivars cannot have __autoreleasing lifetime}}
+    id __autoreleasing z; // expected-error {{ivars cannot have __autoreleasing ownership}}
 }
 @property(copy) id x; // expected-note {{property declared here}}
 @property(copy) id y; // expected-note {{property declared here}} 
@@ -79,7 +79,7 @@
 
 @implementation Gorf
 @synthesize x;
-@synthesize y; // expected-error {{existing ivar 'y' for unsafe_unretained property 'y' must be __unsafe_unretained}}
+@synthesize y; // expected-error {{existing ivar 'y' for property 'y' with  assign attribute must be __unsafe_unretained}}
 @synthesize z;
 @end
 
@@ -94,7 +94,7 @@
 
 @implementation Gorf2
 @synthesize x;
-@synthesize y; // expected-error {{existing ivar 'y' for unsafe_unretained property 'y' must be __unsafe_unretained}}
+@synthesize y; // expected-error {{existing ivar 'y' for property 'y' with unsafe_unretained attribute must be __unsafe_unretained}}
 @synthesize z;
 @end
 
@@ -110,3 +110,18 @@
 @synthesize isAutosaving = _isAutosaving;
 @end
 
+// rdar://10239594
+// Test for 'Class' properties being unretained.
+@interface MyClass {
+@private
+    Class _controllerClass;
+    id _controllerId;
+}
+@property (copy) Class controllerClass;
+@property (copy) id controllerId;
+@end
+
+@implementation MyClass
+@synthesize controllerClass = _controllerClass;
+@synthesize controllerId = _controllerId;
+@end

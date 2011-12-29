@@ -1,5 +1,5 @@
-// RUN: %clang_cc1 -triple i386-unknown-unknown -emit-llvm -o - %s | FileCheck -check-prefix=CHECK-X86-32 %s
-// RUN: %clang_cc1 -triple x86_64-unknown-unknown -emit-llvm -o - %s | FileCheck -check-prefix=CHECK-X86-64 %s
+// RUN: %clang_cc1 -triple i386-unknown-unknown -fobjc-fragile-abi -emit-llvm -o - %s | FileCheck -check-prefix=CHECK-X86-32 %s
+// RUN: %clang_cc1 -triple x86_64-unknown-unknown -fobjc-fragile-abi -emit-llvm -o - %s | FileCheck -check-prefix=CHECK-X86-64 %s
 
 @interface A
 -(void) im0;
@@ -28,13 +28,13 @@ void f2(A *a) {
 @interface B : A @end
 @implementation B : A
 -(void) foo {
-  // CHECK-X86-32: call void bitcast (i8* (%struct._objc_method_description*, i8*, ...)* @objc_msgSendSuper to void (%struct._objc_method_description*, i8*, i32)*)
-  // CHECK-X86-64: call void bitcast (i8* (%struct._objc_method_description*, i8*, ...)* @objc_msgSendSuper to void (%struct._objc_method_description*, i8*, i32)*)
+  // CHECK-X86-32: call void bitcast (i8* (%struct._objc_super*, i8*, ...)* @objc_msgSendSuper to void (%struct._objc_super*, i8*, i32)*)
+  // CHECK-X86-64: call void bitcast (i8* (%struct._objc_super*, i8*, ...)* @objc_msgSendSuper to void (%struct._objc_super*, i8*, i32)*)
   [super im1: 1];
 }
 -(void) bar {
-  // CHECK-X86-32: call void (%struct._objc_method_description*, i8*, i32, i32, ...)* bitcast (i8* (%struct._objc_method_description*, i8*, ...)* @objc_msgSendSuper to void (%struct._objc_method_description*, i8*, i32, i32, ...)*)
-  // CHECK-X86-64: call void (%struct._objc_method_description*, i8*, i32, i32, ...)* bitcast (i8* (%struct._objc_method_description*, i8*, ...)* @objc_msgSendSuper to void (%struct._objc_method_description*, i8*, i32, i32, ...)*)
+  // CHECK-X86-32: call void (%struct._objc_super*, i8*, i32, i32, ...)* bitcast (i8* (%struct._objc_super*, i8*, ...)* @objc_msgSendSuper to void (%struct._objc_super*, i8*, i32, i32, ...)*)
+  // CHECK-X86-64: call void (%struct._objc_super*, i8*, i32, i32, ...)* bitcast (i8* (%struct._objc_super*, i8*, ...)* @objc_msgSendSuper to void (%struct._objc_super*, i8*, i32, i32, ...)*)
   [super im2: 1, 2];
 }
 

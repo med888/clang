@@ -1,13 +1,13 @@
-// RUN: %clang_cc1 -fobjc-nonfragile-abi -verify -fsyntax-only %s
+// RUN: %clang_cc1 -verify -fsyntax-only %s
 
-@class I0;
+@class I0; // expected-note 3{{forward declaration of class here}}
 
 // rdar://6811884
 int g0 = sizeof(I0); // expected-error{{invalid application of 'sizeof' to an incomplete type 'I0'}}
 
 // rdar://6821047
 void *g3(I0 *P) {
-  P = P+5;        // expected-error {{arithmetic on pointer to incomplete type 'I0 *'}}
+  P = P+5;        // expected-error {{arithmetic on a pointer to an incomplete type 'I0'}}
 
   return &P[4];   // expected-error{{subscript of pointer to incomplete type 'I0'}}
 }

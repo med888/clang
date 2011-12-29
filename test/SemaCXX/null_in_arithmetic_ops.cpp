@@ -33,7 +33,7 @@ void f() {
   v = 0 ? NULL + d : d + NULL; // \
     expected-error {{invalid operands to binary expression ('long' and 'void (X::*)()')}} \
     expected-error {{invalid operands to binary expression ('void (X::*)()' and 'long')}}
-  v = 0 ? NULL + e : e + NULL; // expected-error 2{{arithmetic on pointer to function type 'void (*)()'}}
+  v = 0 ? NULL + e : e + NULL; // expected-error 2{{arithmetic on a pointer to the function type 'void ()'}}
   v = 0 ? NULL + f : f + NULL; // expected-warning 2{{use of NULL in arithmetic operation}}
   v = 0 ? NULL + "f" : "f" + NULL; // expected-warning 2{{use of NULL in arithmetic operation}}
 
@@ -64,12 +64,12 @@ void f() {
   a |= NULL; // expected-warning{{use of NULL in arithmetic operation}}
   a ^= NULL; // expected-warning{{use of NULL in arithmetic operation}}
 
-  b = a < NULL || NULL < a; // expected-warning 2{{use of NULL in arithmetic operation}}
-  b = a > NULL || NULL > a; // expected-warning 2{{use of NULL in arithmetic operation}}
-  b = a <= NULL || NULL <= a; // expected-warning 2{{use of NULL in arithmetic operation}}
-  b = a >= NULL || NULL >= a; // expected-warning 2{{use of NULL in arithmetic operation}}
-  b = a == NULL || NULL == a; // expected-warning 2{{use of NULL in arithmetic operation}}
-  b = a != NULL || NULL != a; // expected-warning 2{{use of NULL in arithmetic operation}}
+  b = a < NULL || a > NULL; // expected-warning 2{{comparison between NULL and non-pointer ('int' and NULL)}}
+  b = NULL < a || NULL > a; // expected-warning 2{{comparison between NULL and non-pointer (NULL and 'int')}}
+  b = a <= NULL || a >= NULL; // expected-warning 2{{comparison between NULL and non-pointer ('int' and NULL)}}
+  b = NULL <= a || NULL >= a; // expected-warning 2{{comparison between NULL and non-pointer (NULL and 'int')}}
+  b = a == NULL || a != NULL; // expected-warning 2{{comparison between NULL and non-pointer ('int' and NULL)}}
+  b = NULL == a || NULL != a; // expected-warning 2{{comparison between NULL and non-pointer (NULL and 'int')}}
 
   b = &a < NULL || NULL < &a || &a > NULL || NULL > &a;
   b = &a <= NULL || NULL <= &a || &a >= NULL || NULL >= &a;
@@ -82,7 +82,7 @@ void f() {
   b = NULL <= NULL || NULL >= NULL;
   b = NULL == NULL || NULL != NULL;
 
-  b = ((NULL)) != a;  // expected-warning{{use of NULL in arithmetic operation}}
+  b = ((NULL)) != a;  // expected-warning{{comparison between NULL and non-pointer (NULL and 'int')}}
 
   // Check that even non-standard pointers don't warn.
   b = c == NULL || NULL == c || c != NULL || NULL != c;

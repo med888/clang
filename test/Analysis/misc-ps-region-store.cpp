@@ -1,5 +1,5 @@
-// RUN: %clang_cc1 -triple i386-apple-darwin9 -analyze -analyzer-checker=core,core.experimental -analyzer-store=region -verify -fblocks -analyzer-opt-analyze-nested-blocks %s
-// RUN: %clang_cc1 -triple x86_64-apple-darwin9 -analyze -analyzer-checker=core,core.experimental -analyzer-store=region -verify -fblocks   -analyzer-opt-analyze-nested-blocks %s
+// RUN: %clang_cc1 -triple i386-apple-darwin9 -analyze -analyzer-checker=core,experimental.core -analyzer-store=region -verify -fblocks -analyzer-opt-analyze-nested-blocks %s
+// RUN: %clang_cc1 -triple x86_64-apple-darwin9 -analyze -analyzer-checker=core,experimental.core -analyzer-store=region -verify -fblocks   -analyzer-opt-analyze-nested-blocks %s
 
 // Test basic handling of references.
 char &test1_aux();
@@ -412,5 +412,97 @@ void TestAssignIntoSymbolicOffset::test(int x, int y) {
     // Previously triggered a null dereference.
     stuff[x][y] = 0; // no-warning
   }
+}
+
+// Test loads from static fields.  This previously triggered an uninitialized
+// value warning.
+class ClassWithStatic {
+public:
+    static const unsigned value = 1;
+};
+
+int rdar9948787_negative() {
+    ClassWithStatic classWithStatic;
+    unsigned value = classWithStatic.value;
+    if (value == 1)
+      return 1;
+    int *p = 0;
+    *p = 0xDEADBEEF; // no-warning
+    return 0;
+}
+
+int rdar9948787_positive() {
+    ClassWithStatic classWithStatic;
+    unsigned value = classWithStatic.value;
+    if (value == 0)
+      return 1;
+    int *p = 0;
+    *p = 0xDEADBEEF; // expected-warning {{null}}
+    return 0;
+}
+
+// Regression test against global constants and switches.
+enum rdar10202899_ValT { rdar10202899_ValTA, rdar10202899_ValTB, rdar10202899_ValTC };
+const rdar10202899_ValT val = rdar10202899_ValTA;
+void rdar10202899_test1() {
+  switch (val) {
+    case rdar10202899_ValTA: {}
+  };
+}
+
+void rdar10202899_test2() {
+  if (val == rdar10202899_ValTA)
+   return;
+  int *p = 0;
+  *p = 0xDEADBEEF;
+}
+
+void rdar10202899_test3() {
+  switch (val) {
+    case rdar10202899_ValTA: return;
+    default: ;
+  };
+  int *p = 0;
+  *p = 0xDEADBEEF;
+}
+
+// This used to crash the analyzer because of the unnamed bitfield.
+void PR11249()
+{
+  struct {
+    char f1:4;
+    char   :4;
+    char f2[1];
+    char f3;
+  } V = { 1, {2}, 3 };
+  int *p = 0;
+  if (V.f1 != 1)
+    *p = 0xDEADBEEF;  // no-warning
+  if (V.f2[0] != 2)
+    *p = 0xDEADBEEF;  // no-warning
+  if (V.f3 != 3)
+    *p = 0xDEADBEEF;  // no-warning
+}
+
+// Handle doing a load from the memory associated with the code for
+// a function.
+extern double nan( const char * );
+double PR11450() {
+  double NaN = *(double*) nan;
+  return NaN;
+}
+
+// Test that 'this' is assumed non-null upon analyzing the entry to a "top-level"
+// function (i.e., when not analyzing from a specific caller).
+struct TestNullThis {
+  int field;
+  void test();
+};
+
+void TestNullThis::test() {
+  int *p = &field;
+  if (p)
+    return;
+  field = 2; // no-warning
 }
 

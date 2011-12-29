@@ -10,35 +10,41 @@
 #include "clang/CodeGen/BackendUtil.h"
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/TargetOptions.h"
+#include "clang/Basic/LangOptions.h"
 #include "clang/Frontend/CodeGenOptions.h"
 #include "clang/Frontend/FrontendDiagnostic.h"
 #include "llvm/Module.h"
 #include "llvm/PassManager.h"
+#include "llvm/Analysis/Verifier.h"
 #include "llvm/Assembly/PrintModulePass.h"
 #include "llvm/Bitcode/ReaderWriter.h"
 #include "llvm/CodeGen/RegAllocRegistry.h"
 #include "llvm/CodeGen/SchedulerRegistry.h"
+#include "llvm/MC/SubtargetFeature.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FormattedStream.h"
 #include "llvm/Support/PrettyStackTrace.h"
-#include "llvm/Support/PassManagerBuilder.h"
+#include "llvm/Support/TargetRegistry.h"
 #include "llvm/Support/Timer.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Target/SubtargetFeature.h"
 #include "llvm/Target/TargetData.h"
+#include "llvm/Target/TargetLibraryInfo.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
-#include "llvm/Target/TargetRegistry.h"
 #include "llvm/Transforms/Instrumentation.h"
+#include "llvm/Transforms/IPO.h"
+#include "llvm/Transforms/IPO/PassManagerBuilder.h"
+#include "llvm/Transforms/Scalar.h"
 using namespace clang;
 using namespace llvm;
 
 namespace {
 
 class EmitAssemblyHelper {
-  Diagnostic &Diags;
+  DiagnosticsEngine &Diags;
   const CodeGenOptions &CodeGenOpts;
-  const TargetOptions &TargetOpts;
+  const clang::TargetOptions &TargetOpts;
+  const LangOptions &LangOpts;
   Module *TheModule;
 
   Timer CodeGenerationTime;
@@ -80,10 +86,12 @@ private:
   bool AddEmitPasses(BackendAction Action, formatted_raw_ostream &OS);
 
 public:
-  EmitAssemblyHelper(Diagnostic &_Diags,
-                     const CodeGenOptions &CGOpts, const TargetOptions &TOpts,
+  EmitAssemblyHelper(DiagnosticsEngine &_Diags,
+                     const CodeGenOptions &CGOpts,
+                     const clang::TargetOptions &TOpts,
+                     const LangOptions &LOpts,
                      Module *M)
-    : Diags(_Diags), CodeGenOpts(CGOpts), TargetOpts(TOpts),
+    : Diags(_Diags), CodeGenOpts(CGOpts), TargetOpts(TOpts), LangOpts(LOpts),
       TheModule(M), CodeGenerationTime("Code Generation Time"),
       CodeGenPasses(0), PerModulePasses(0), PerFunctionPasses(0) {}
 
@@ -96,6 +104,21 @@ public:
   void EmitAssembly(BackendAction Action, raw_ostream *OS);
 };
 
+}
+
+static void addObjCARCExpandPass(const PassManagerBuilder &Builder, PassManagerBase &PM) {
+  if (Builder.OptLevel > 0)
+    PM.add(createObjCARCExpandPass());
+}
+
+static void addObjCARCOptPass(const PassManagerBuilder &Builder, PassManagerBase &PM) {
+  if (Builder.OptLevel > 0)
+    PM.add(createObjCARCOptPass());
+}
+
+static void addAddressSanitizerPass(const PassManagerBuilder &Builder,
+                                    PassManagerBase &PM) {
+  PM.add(createAddressSanitizerPass());
 }
 
 void EmitAssemblyHelper::CreatePasses() {
@@ -116,6 +139,21 @@ void EmitAssemblyHelper::CreatePasses() {
   PMBuilder.DisableSimplifyLibCalls = !CodeGenOpts.SimplifyLibCalls;
   PMBuilder.DisableUnitAtATime = !CodeGenOpts.UnitAtATime;
   PMBuilder.DisableUnrollLoops = !CodeGenOpts.UnrollLoops;
+
+  // In ObjC ARC mode, add the main ARC optimization passes.
+  if (LangOpts.ObjCAutoRefCount) {
+    PMBuilder.addExtension(PassManagerBuilder::EP_EarlyAsPossible,
+                           addObjCARCExpandPass);
+    PMBuilder.addExtension(PassManagerBuilder::EP_ScalarOptimizerLate,
+                           addObjCARCOptPass);
+  }
+
+  if (LangOpts.AddressSanitizer) {
+    PMBuilder.addExtension(PassManagerBuilder::EP_ScalarOptimizerLate,
+                           addAddressSanitizerPass);
+    PMBuilder.addExtension(PassManagerBuilder::EP_EnabledOnOptLevel0,
+                           addAddressSanitizerPass);
+  }
   
   // Figure out TargetLibraryInfo.
   Triple TargetTriple(TheModule->getTargetTriple());
@@ -181,62 +219,24 @@ bool EmitAssemblyHelper::AddEmitPasses(BackendAction Action,
   // being gross, this is also totally broken if we ever care about
   // concurrency.
 
-  // Set frame pointer elimination mode.
-  if (!CodeGenOpts.DisableFPElim) {
-    llvm::NoFramePointerElim = false;
-    llvm::NoFramePointerElimNonLeaf = false;
-  } else if (CodeGenOpts.OmitLeafFramePointer) {
-    llvm::NoFramePointerElim = false;
-    llvm::NoFramePointerElimNonLeaf = true;
-  } else {
-    llvm::NoFramePointerElim = true;
-    llvm::NoFramePointerElimNonLeaf = true;
-  }
-
-  // Set float ABI type.
-  if (CodeGenOpts.FloatABI == "soft" || CodeGenOpts.FloatABI == "softfp")
-    llvm::FloatABIType = llvm::FloatABI::Soft;
-  else if (CodeGenOpts.FloatABI == "hard")
-    llvm::FloatABIType = llvm::FloatABI::Hard;
-  else {
-    assert(CodeGenOpts.FloatABI.empty() && "Invalid float abi!");
-    llvm::FloatABIType = llvm::FloatABI::Default;
-  }
-
-  llvm::LessPreciseFPMADOption = CodeGenOpts.LessPreciseFPMAD;
-  llvm::NoInfsFPMath = CodeGenOpts.NoInfsFPMath;
-  llvm::NoNaNsFPMath = CodeGenOpts.NoNaNsFPMath;
-  NoZerosInBSS = CodeGenOpts.NoZeroInitializedInBSS;
-  llvm::UnsafeFPMath = CodeGenOpts.UnsafeFPMath;
-  llvm::UseSoftFloat = CodeGenOpts.SoftFloat;
-
   TargetMachine::setAsmVerbosityDefault(CodeGenOpts.AsmVerbose);
 
   TargetMachine::setFunctionSections(CodeGenOpts.FunctionSections);
   TargetMachine::setDataSections    (CodeGenOpts.DataSections);
 
   // FIXME: Parse this earlier.
-  if (CodeGenOpts.RelocationModel == "static") {
-    TargetMachine::setRelocationModel(llvm::Reloc::Static);
-  } else if (CodeGenOpts.RelocationModel == "pic") {
-    TargetMachine::setRelocationModel(llvm::Reloc::PIC_);
-  } else {
-    assert(CodeGenOpts.RelocationModel == "dynamic-no-pic" &&
-           "Invalid PIC model!");
-    TargetMachine::setRelocationModel(llvm::Reloc::DynamicNoPIC);
-  }
-  // FIXME: Parse this earlier.
+  llvm::CodeModel::Model CM;
   if (CodeGenOpts.CodeModel == "small") {
-    TargetMachine::setCodeModel(llvm::CodeModel::Small);
+    CM = llvm::CodeModel::Small;
   } else if (CodeGenOpts.CodeModel == "kernel") {
-    TargetMachine::setCodeModel(llvm::CodeModel::Kernel);
+    CM = llvm::CodeModel::Kernel;
   } else if (CodeGenOpts.CodeModel == "medium") {
-    TargetMachine::setCodeModel(llvm::CodeModel::Medium);
+    CM = llvm::CodeModel::Medium;
   } else if (CodeGenOpts.CodeModel == "large") {
-    TargetMachine::setCodeModel(llvm::CodeModel::Large);
+    CM = llvm::CodeModel::Large;
   } else {
     assert(CodeGenOpts.CodeModel.empty() && "Invalid code model!");
-    TargetMachine::setCodeModel(llvm::CodeModel::Default);
+    CM = llvm::CodeModel::Default;
   }
 
   std::vector<const char *> BackendArgs;
@@ -253,21 +253,76 @@ bool EmitAssemblyHelper::AddEmitPasses(BackendAction Action,
     BackendArgs.push_back("-time-passes");
   for (unsigned i = 0, e = CodeGenOpts.BackendOptions.size(); i != e; ++i)
     BackendArgs.push_back(CodeGenOpts.BackendOptions[i].c_str());
+  if (CodeGenOpts.NoGlobalMerge)
+    BackendArgs.push_back("-global-merge=false");
   BackendArgs.push_back(0);
   llvm::cl::ParseCommandLineOptions(BackendArgs.size() - 1,
                                     const_cast<char **>(&BackendArgs[0]));
 
   std::string FeaturesStr;
-  if (TargetOpts.CPU.size() || TargetOpts.Features.size()) {
+  if (TargetOpts.Features.size()) {
     SubtargetFeatures Features;
-    Features.setCPU(TargetOpts.CPU);
     for (std::vector<std::string>::const_iterator
            it = TargetOpts.Features.begin(),
            ie = TargetOpts.Features.end(); it != ie; ++it)
       Features.AddFeature(*it);
     FeaturesStr = Features.getString();
   }
-  TargetMachine *TM = TheTarget->createTargetMachine(Triple, FeaturesStr);
+
+  llvm::Reloc::Model RM = llvm::Reloc::Default;
+  if (CodeGenOpts.RelocationModel == "static") {
+    RM = llvm::Reloc::Static;
+  } else if (CodeGenOpts.RelocationModel == "pic") {
+    RM = llvm::Reloc::PIC_;
+  } else {
+    assert(CodeGenOpts.RelocationModel == "dynamic-no-pic" &&
+           "Invalid PIC model!");
+    RM = llvm::Reloc::DynamicNoPIC;
+  }
+
+  CodeGenOpt::Level OptLevel = CodeGenOpt::Default;
+  switch (CodeGenOpts.OptimizationLevel) {
+  default: break;
+  case 0: OptLevel = CodeGenOpt::None; break;
+  case 3: OptLevel = CodeGenOpt::Aggressive; break;
+  }
+
+  llvm::TargetOptions Options;
+
+  // Set frame pointer elimination mode.
+  if (!CodeGenOpts.DisableFPElim) {
+    Options.NoFramePointerElim = false;
+    Options.NoFramePointerElimNonLeaf = false;
+  } else if (CodeGenOpts.OmitLeafFramePointer) {
+    Options.NoFramePointerElim = false;
+    Options.NoFramePointerElimNonLeaf = true;
+  } else {
+    Options.NoFramePointerElim = true;
+    Options.NoFramePointerElimNonLeaf = true;
+  }
+
+  // Set float ABI type.
+  if (CodeGenOpts.FloatABI == "soft" || CodeGenOpts.FloatABI == "softfp")
+    Options.FloatABIType = llvm::FloatABI::Soft;
+  else if (CodeGenOpts.FloatABI == "hard")
+    Options.FloatABIType = llvm::FloatABI::Hard;
+  else {
+    assert(CodeGenOpts.FloatABI.empty() && "Invalid float abi!");
+    Options.FloatABIType = llvm::FloatABI::Default;
+  }
+
+  Options.LessPreciseFPMADOption = CodeGenOpts.LessPreciseFPMAD;
+  Options.NoInfsFPMath = CodeGenOpts.NoInfsFPMath;
+  Options.NoNaNsFPMath = CodeGenOpts.NoNaNsFPMath;
+  Options.NoZerosInBSS = CodeGenOpts.NoZeroInitializedInBSS;
+  Options.UnsafeFPMath = CodeGenOpts.UnsafeFPMath;
+  Options.UseSoftFloat = CodeGenOpts.SoftFloat;
+  Options.StackAlignmentOverride = CodeGenOpts.StackAlignment;
+  Options.RealignStack = CodeGenOpts.StackRealignment;
+
+  TargetMachine *TM = TheTarget->createTargetMachine(Triple, TargetOpts.CPU,
+                                                     FeaturesStr, Options,
+                                                     RM, CM, OptLevel);
 
   if (CodeGenOpts.RelaxAll)
     TM->setMCRelaxAll(true);
@@ -275,16 +330,13 @@ bool EmitAssemblyHelper::AddEmitPasses(BackendAction Action,
     TM->setMCSaveTempLabels(true);
   if (CodeGenOpts.NoDwarf2CFIAsm)
     TM->setMCUseCFI(false);
+  if (!CodeGenOpts.NoDwarfDirectoryAsm)
+    TM->setMCUseDwarfDirectory(true);
+  if (CodeGenOpts.NoExecStack)
+    TM->setMCNoExecStack(true);
 
   // Create the code generator passes.
   PassManager *PM = getCodeGenPasses();
-  CodeGenOpt::Level OptLevel = CodeGenOpt::Default;
-
-  switch (CodeGenOpts.OptimizationLevel) {
-  default: break;
-  case 0: OptLevel = CodeGenOpt::None; break;
-  case 3: OptLevel = CodeGenOpt::Aggressive; break;
-  }
 
   // Normal mode, emit a .s or .o file by running the code generator. Note,
   // this also adds codegenerator level optimization passes.
@@ -295,7 +347,14 @@ bool EmitAssemblyHelper::AddEmitPasses(BackendAction Action,
     CGFT = TargetMachine::CGFT_Null;
   else
     assert(Action == Backend_EmitAssembly && "Invalid action!");
-  if (TM->addPassesToEmitFile(*PM, OS, CGFT, OptLevel,
+
+  // Add ObjC ARC final-cleanup optimizations. This is done as part of the
+  // "codegen" passes so that it isn't run multiple times when there is
+  // inlining happening.
+  if (LangOpts.ObjCAutoRefCount)
+    PM->add(createObjCARCContractPass());
+
+  if (TM->addPassesToEmitFile(*PM, OS, CGFT,
                               /*DisableVerify=*/!CodeGenOpts.VerifyModule)) {
     Diags.Report(diag::err_fe_unable_to_interface_with_target);
     return false;
@@ -356,10 +415,13 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action, raw_ostream *OS) {
   }
 }
 
-void clang::EmitBackendOutput(Diagnostic &Diags, const CodeGenOptions &CGOpts,
-                              const TargetOptions &TOpts, Module *M,
+void clang::EmitBackendOutput(DiagnosticsEngine &Diags,
+                              const CodeGenOptions &CGOpts,
+                              const clang::TargetOptions &TOpts,
+                              const LangOptions &LOpts,
+                              Module *M,
                               BackendAction Action, raw_ostream *OS) {
-  EmitAssemblyHelper AsmHelper(Diags, CGOpts, TOpts, M);
+  EmitAssemblyHelper AsmHelper(Diags, CGOpts, TOpts, LOpts, M);
 
   AsmHelper.EmitAssembly(Action, OS);
 }

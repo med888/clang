@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -fsyntax-only -fobjc-nonfragile-abi -fobjc-arc -fblocks -verify %s
+// RUN: %clang_cc1 -fsyntax-only -fobjc-runtime-has-weak -fobjc-arc -fblocks -verify %s
 
 @interface Test0
 - (void) setBlock: (void(^)(void)) block;
@@ -27,7 +27,7 @@ void test0(Test0 *x) {
 }
 
 @interface BlockOwner
-@property (retain) void (^strong)(void);
+@property (retain) void (^strong)(void); // expected-warning {{retain'ed block property does not copy the block - use copy attribute instead}}
 @end
 
 @interface Test1 {
@@ -89,3 +89,37 @@ void test2_helper(id);
   };
 }
 @end
+
+
+@interface NSOperationQueue {}
+- (void)addOperationWithBlock:(void (^)(void))block;
+- (void)addSomethingElse:(void (^)(void))block;
+
+@end
+
+@interface Test3 {
+  NSOperationQueue *myOperationQueue;
+  unsigned count;
+}
+@end
+void doSomething(unsigned v);
+@implementation Test3
+- (void) test {
+  // 'addOperationWithBlock:' is specifically whitelisted.
+  [myOperationQueue addOperationWithBlock:^() { // no-warning
+    if (count > 20) {
+      doSomething(count);
+    }
+  }];
+}
+- (void) test_positive {
+  // Sanity check that we are really whitelisting 'addOperationWithBlock:' and not doing
+  // something funny.
+  [myOperationQueue addSomethingElse:^() { // expected-note {{block will be retained by an object strongly retained by the captured object}}
+    if (count > 20) { // expected-warning {{capturing 'self' strongly in this block is likely to lead to a retain cycle}}
+      doSomething(count);
+    }
+  }];
+}
+@end
+

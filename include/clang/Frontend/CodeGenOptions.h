@@ -37,6 +37,7 @@ public:
 
   unsigned AsmVerbose        : 1; /// -dA, -fverbose-asm.
   unsigned ObjCAutoRefCountExceptions : 1; /// Whether ARC should be EH-safe.
+  unsigned CUDAIsDevice      : 1; /// Set when compiling for CUDA device.
   unsigned CXAAtExit         : 1; /// Use __cxa_atexit for calling destructors.
   unsigned CXXCtorDtorAliases: 1; /// Emit complete ctors/dtors as linker
                                   /// aliases to base ctors when possible.
@@ -70,11 +71,17 @@ public:
   unsigned MergeAllConstants : 1; /// Merge identical constants.
   unsigned NoCommon          : 1; /// Set when -fno-common or C++ is enabled.
   unsigned NoDwarf2CFIAsm    : 1; /// Set when -fno-dwarf2-cfi-asm is enabled.
+  unsigned NoDwarfDirectoryAsm : 1; /// Set when -fno-dwarf-directory-asm is
+                                    /// enabled.
+  unsigned NoExecStack       : 1; /// Set when -Wa,--noexecstack is enabled.
+  unsigned NoGlobalMerge     : 1; /// Set when -mno-global-merge is enabled.
   unsigned NoImplicitFloat   : 1; /// Set when -mno-implicit-float is enabled.
   unsigned NoInfsFPMath      : 1; /// Assume FP arguments, results not +-Inf.
   unsigned NoNaNsFPMath      : 1; /// Assume FP arguments, results not NaN.
   unsigned NoZeroInitializedInBSS : 1; /// -fno-zero-initialized-in-bss
   unsigned ObjCDispatchMethod : 2; /// Method of Objective-C dispatch to use.
+  unsigned ObjCRuntimeHasARC : 1; /// The target runtime supports ARC natively
+  unsigned ObjCRuntimeHasTerminate : 1; /// The ObjC runtime has objc_terminate
   unsigned OmitLeafFramePointer : 1; /// Set when -momit-leaf-frame-pointer is
                                      /// enabled.
   unsigned OptimizationLevel : 3; /// The -O[0-4] option specified.
@@ -90,8 +97,18 @@ public:
   unsigned UnrollLoops       : 1; /// Control whether loops are unrolled.
   unsigned UnsafeFPMath      : 1; /// Allow unsafe floating point optzns.
   unsigned UnwindTables      : 1; /// Emit unwind tables.
+
+  /// Attempt to use register sized accesses to bit-fields in structures, when
+  /// possible.
+  unsigned UseRegisterSizedBitfieldAccess : 1;
+
   unsigned VerifyModule      : 1; /// Control whether the module should be run
                                   /// through the LLVM Verifier.
+
+  unsigned StackRealignment  : 1; /// Control whether to permit stack
+                                  /// realignment.
+  unsigned StackAlignment;        /// Overrides default stack alignment,
+                                  /// if not 0.
 
   /// The code model to use (-mcmodel).
   std::string CodeModel;
@@ -103,6 +120,9 @@ public:
   /// Enable additional debugging information.
   std::string DebugPass;
 
+  /// The string to embed in debug information as the current working directory.
+  std::string DebugCompilationDir;
+
   /// The string to embed in the debug information for the compile unit, if
   /// non-empty.
   std::string DwarfDebugFlags;
@@ -112,6 +132,9 @@ public:
 
   /// The float precision limit to use, if non-empty.
   std::string LimitFloatPrecision;
+
+  /// The name of the bitcode file to link before optzns.
+  std::string LinkBitcodeFile;
 
   /// The kind of inlining to perform.
   InliningMethod Inlining;
@@ -134,7 +157,7 @@ public:
 public:
   CodeGenOptions() {
     AsmVerbose = 0;
-    ObjCAutoRefCountExceptions = 0;
+    CUDAIsDevice = 0;
     CXAAtExit = 1;
     CXXCtorDtorAliases = 0;
     DataSections = 0;
@@ -161,7 +184,10 @@ public:
     NoNaNsFPMath = 0;
     NoZeroInitializedInBSS = 0;
     NumRegisterParameters = 0;
+    ObjCAutoRefCountExceptions = 0;
     ObjCDispatchMethod = Legacy;
+    ObjCRuntimeHasARC = 0;
+    ObjCRuntimeHasTerminate = 0;
     OmitLeafFramePointer = 0;
     OptimizationLevel = 0;
     OptimizeSize = 0;
@@ -175,7 +201,10 @@ public:
     UnrollLoops = 0;
     UnsafeFPMath = 0;
     UnwindTables = 0;
+    UseRegisterSizedBitfieldAccess = 0;
     VerifyModule = 1;
+    StackRealignment = 0;
+    StackAlignment = 0;
 
     Inlining = NoInlining;
     RelocationModel = "pic";

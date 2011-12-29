@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -fobjc-nonfragile-abi -fsyntax-only -fobjc-arc -Warc-abi -verify -fblocks -triple x86_64-apple-darwin10.0.0 %s
+// RUN: %clang_cc1 -fsyntax-only -fobjc-arc -Warc-abi -verify -fblocks -triple x86_64-apple-darwin10.0.0 %s
 
 // Classes that have an Objective-C object pointer.
 struct HasObjectMember0 { // expected-warning{{'HasObjectMember0' cannot be shared between ARC and non-ARC code; add a copy constructor, a copy assignment operator, and a destructor to make it ABI-compatible}}
@@ -21,7 +21,7 @@ namespace {
 }
 
 // Don't complain if the Objective-C pointer type was explicitly given
-// no lifetime.
+// no ownership.
 struct HasObjectMember3 { 
   __unsafe_unretained id x[3][2];
 };
@@ -75,13 +75,14 @@ struct HasBlockPointerMemberAndNonPOD1 { // expected-warning{{'HasBlockPointerMe
   int (^bp[2][3])(int);
 };
 
-int check_non_pod_objc_pointer0[__is_pod(id)? -1 : 1];
+int check_non_pod_objc_pointer0[__is_pod(id)? 1 : -1];
 int check_non_pod_objc_pointer1[__is_pod(__strong id)? -1 : 1];
 int check_non_pod_objc_pointer2[__is_pod(__unsafe_unretained id)? 1 : -1];
-int check_non_pod_objc_pointer3[__is_pod(id[2][3])? -1 : 1];
+int check_non_pod_objc_pointer3[__is_pod(id[2][3])? 1 : -1];
 int check_non_pod_objc_pointer4[__is_pod(__unsafe_unretained id[2][3])? 1 : -1];
-int check_non_pod_block0[__is_pod(int (^)(int))? -1 : 1];
+int check_non_pod_block0[__is_pod(int (^)(int))? 1 : -1];
 int check_non_pod_block1[__is_pod(int (^ __unsafe_unretained)(int))? 1 : -1];
+int check_non_pod_block2[__is_pod(int (^ __strong)(int))? -1 : 1];
 
 struct FlexibleArrayMember0 {
   int length;
@@ -107,7 +108,7 @@ void vla(int n) {
 @interface Crufty {
   union {
     struct {
-      id object; // expected-note{{has __strong lifetime}}
+      id object; // expected-note{{has __strong ownership}}
     } an_object; // expected-error{{union member 'an_object' has a non-trivial copy constructor}}
     void *ptr;
   } storage;

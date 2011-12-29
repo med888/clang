@@ -67,10 +67,12 @@ def Named : Decl<1>;
 def LinkageSpec : Decl, DeclContext;
 def ObjCPropertyImpl : Decl;
 def ObjCForwardProtocol : Decl;
-def ObjCClass : Decl;
 def FileScopeAsm : Decl;
 def AccessSpec : Decl;
 def Friend : Decl;
 def FriendTemplate : Decl;
 def StaticAssert : Decl;
 def Block : Decl, DeclContext;
+def ClassScopeFunctionSpecialization : Decl;
+def Import : Decl;
+

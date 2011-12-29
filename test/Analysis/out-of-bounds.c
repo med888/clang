@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -Wno-array-bounds -analyze -analyzer-checker=core,security.experimental.ArrayBoundV2 -verify %s
+// RUN: %clang_cc1 -Wno-array-bounds -analyze -analyzer-checker=core,experimental.security.ArrayBoundV2 -verify %s
 
 // Tests doing an out-of-bounds access after the end of an array using:
 // - constant integer index
@@ -94,7 +94,6 @@ void test2_ptr(int x) {
   p[-1] = 1; // expected-warning{{Out of bound memory access}}
 }
 
-// ** FIXME ** Doesn't work yet because we don't support pointer arithmetic.
 // Tests doing an out-of-bounds access before the start of an array using:
 // - indirect pointer to buffer, manipulated using simple pointer arithmetic
 // - constant integer index
@@ -103,7 +102,7 @@ void test2_ptr_arith(int x) {
   int buf[100];
   int *p = buf;
   --p;
-  p[0] = 1; // no-warning
+  p[0] = 1; // expected-warning {{Out of bound memory access (accessed memory precedes memory block)}}
 }
 
 // Tests doing an out-of-bounds access before the start of a multi-dimensional
@@ -129,13 +128,11 @@ void test2_multi_ok(int x) {
   buf[0][0] = 1; // no-warning
 }
 
-// *** FIXME ***
-// We don't get a warning here yet because our symbolic constraint solving
-// doesn't handle:  (symbol * constant) < constant
+// Testing if solver handles (symbol * constant) < constant
 void test3(int x) {
   int buf[100];
   if (x < 0)
-    buf[x] = 1; 
+    buf[x] = 1; // expected-warning {{Out of bound memory access (accessed memory precedes memory block)}}
 }
 
 // *** FIXME ***

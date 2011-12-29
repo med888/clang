@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -triple x86_64-apple-darwin11 -fobjc-nonfragile-abi -fsyntax-only -fobjc-arc -fblocks -verify %s
+// RUN: %clang_cc1 -triple x86_64-apple-darwin11 -fobjc-runtime-has-weak -fsyntax-only -fobjc-arc -fblocks -verify %s
 
 typedef unsigned long NSUInteger;
 
@@ -41,10 +41,10 @@ __weak __strong id x; // expected-error {{the type '__strong id' already has ret
 // rdar://8843638
 
 @interface I
-- (id)retain;
-- (id)autorelease;
-- (oneway void)release;
-- (NSUInteger)retainCount;
+- (id)retain; // expected-note {{method declared here}}
+- (id)autorelease; // expected-note {{method declared here}}
+- (oneway void)release; // expected-note {{method declared here}}
+- (NSUInteger)retainCount; // expected-note {{method declared here}}
 @end
 
 @implementation I
@@ -55,10 +55,14 @@ __weak __strong id x; // expected-error {{the type '__strong id' already has ret
 @end
 
 @implementation I(CAT)
-- (id)retain{return 0;} // expected-error {{ARC forbids implementation of 'retain'}}
-- (id)autorelease{return 0;} // expected-error {{ARC forbids implementation of 'autorelease'}}
-- (oneway void)release{} // expected-error {{ARC forbids implementation of 'release'}}
-- (NSUInteger)retainCount{ return 0; } // expected-error {{ARC forbids implementation of 'retainCount'}}
+- (id)retain{return 0;} // expected-error {{ARC forbids implementation of 'retain'}} \
+                        // expected-warning {{category is implementing a method which will also be implemented by its primary class}}
+- (id)autorelease{return 0;} // expected-error {{ARC forbids implementation of 'autorelease'}} \
+                         // expected-warning {{category is implementing a method which will also be implemented by its primary class}}
+- (oneway void)release{} // expected-error {{ARC forbids implementation of 'release'}} \
+                          // expected-warning {{category is implementing a method which will also be implemented by its primary class}}
+- (NSUInteger)retainCount{ return 0; } // expected-error {{ARC forbids implementation of 'retainCount'}} \
+                          // expected-warning {{category is implementing a method which will also be implemented by its primary class}}
 @end
 
 // rdar://8861761
@@ -185,13 +189,13 @@ void test7_unsafe(void) {
 - (id) init50 { return 0; }
 
 - (void) init01 {} // expected-error {{method was declared as an 'init' method, but its implementation doesn't match because its result type is not an object pointer}} \
-                   // expected-warning{{ method is expected to return an instance of its class type 'Test8', but is declared to return 'void'}}
+                   // expected-warning{{method is expected to return an instance of its class type 'Test8', but is declared to return 'void'}}
 - (void) init11 {}
 - (void) init21 {} // expected-error {{method was declared as an 'init' method, but its implementation doesn't match because its result type is not an object pointer}}
 - (void) init31 {} // expected-error {{method was declared as an 'init' method, but its implementation doesn't match because its result type is not an object pointer}} \
-                   // expected-warning{{ method is expected to return an instance of its class type 'Test8', but is declared to return 'void'}}
+                   // expected-warning{{method is expected to return an instance of its class type 'Test8', but is declared to return 'void'}}
 - (void) init41 {} // expected-error {{method was declared as an 'init' method, but its implementation doesn't match because its result type is not an object pointer}} \
-                   // expected-warning{{ method is expected to return an instance of its class type 'Test8', but is declared to return 'void'}}
+                   // expected-warning{{method is expected to return an instance of its class type 'Test8', but is declared to return 'void'}}
 - (void) init51 {}
 
 - (Test8_incomplete*) init02 { return 0; } // expected-error {{init methods must return a type related to the receiver type}} \
@@ -259,8 +263,8 @@ void test11(id op, void *vp) {
   b = (vp == nil);
   b = (nil == vp);
 
-  b = (vp == op); // expected-error {{implicit conversion of an Objective-C pointer to 'void *'}}
-  b = (op == vp); // expected-error {{implicit conversion of a non-Objective-C pointer type 'void *' to 'id'}}
+  b = (vp == op); // expected-error {{implicit conversion of Objective-C pointer type 'id' to C pointer type 'void *' requires a bridged cast}} expected-note {{use __bridge}} expected-note {{use __bridge_retained}}
+  b = (op == vp); // expected-error {{implicit conversion of C pointer type 'void *' to Objective-C pointer type 'id' requires a bridged cast}} expected-note {{use __bridge}} expected-note {{use __bridge_transfer}}
 }
 
 void test12(id collection) {
@@ -287,6 +291,16 @@ void test12(id collection) {
 }
 - (void) noninit {
   self = 0; // expected-error {{cannot assign to 'self' outside of a method in the init family}}
+}
+@end
+
+// <rdar://problem/10274056>
+@interface Test13_B
+- (id) consumesSelf __attribute__((ns_consumes_self));
+@end
+@implementation Test13_B
+- (id) consumesSelf {
+  self = 0; // no-warning
 }
 @end
 
@@ -329,7 +343,7 @@ void test14() {
 }
 
 void test15() {
-  __block __autoreleasing id x; // expected-error {{__block variables cannot have __autoreleasing lifetime}}
+  __block __autoreleasing id x; // expected-error {{__block variables cannot have __autoreleasing ownership}}
 }
 
 struct Test16;
@@ -364,7 +378,7 @@ void test16(void) {
   [v test16_6: 0];
 }
 
-@class Test17;
+@class Test17; // expected-note 2{{forward declaration of class here}}
 @protocol Test17p
 - (void) test17;
 + (void) test17;
@@ -389,7 +403,7 @@ struct Test19 *const test19b = 0;
 void test19(void) {
   id x;
   x = (id) test19a; // expected-error {{bridged cast}} \
-  // expected-note{{use __bridge to convert directly (no change in ownership))}} \
+  // expected-note{{use __bridge to convert directly (no change in ownership)}} \
   // expected-note{{use __bridge_transfer to transfer ownership of a +1 'struct Test19 *' into ARC}}
   x = (id) test19b; // expected-error {{bridged cast}} \
   // expected-note{{use __bridge to convert directly (no change in ownership)}} \
@@ -397,16 +411,16 @@ void test19(void) {
 }
 
 // rdar://problem/8951453
-static __thread id test20_implicit; // expected-error {{thread-local variable has non-trivial lifetime: type is '__strong id'}}
-static __thread __strong id test20_strong; // expected-error {{thread-local variable has non-trivial lifetime: type is '__strong id'}}
-static __thread __weak id test20_weak; // expected-error {{thread-local variable has non-trivial lifetime: type is '__weak id'}}
-static __thread __autoreleasing id test20_autoreleasing; // expected-error {{thread-local variable has non-trivial lifetime: type is '__autoreleasing id'}} expected-error {{global variables cannot have __autoreleasing lifetime}}
+static __thread id test20_implicit; // expected-error {{thread-local variable has non-trivial ownership: type is '__strong id'}}
+static __thread __strong id test20_strong; // expected-error {{thread-local variable has non-trivial ownership: type is '__strong id'}}
+static __thread __weak id test20_weak; // expected-error {{thread-local variable has non-trivial ownership: type is '__weak id'}}
+static __thread __autoreleasing id test20_autoreleasing; // expected-error {{thread-local variable has non-trivial ownership: type is '__autoreleasing id'}} expected-error {{global variables cannot have __autoreleasing ownership}}
 static __thread __unsafe_unretained id test20_unsafe;
 void test20(void) {
-  static __thread id test20_implicit; // expected-error {{thread-local variable has non-trivial lifetime: type is '__strong id'}}
-  static __thread __strong id test20_strong; // expected-error {{thread-local variable has non-trivial lifetime: type is '__strong id'}}
-  static __thread __weak id test20_weak; // expected-error {{thread-local variable has non-trivial lifetime: type is '__weak id'}}
-  static __thread __autoreleasing id test20_autoreleasing; // expected-error {{thread-local variable has non-trivial lifetime: type is '__autoreleasing id'}} expected-error {{global variables cannot have __autoreleasing lifetime}}
+  static __thread id test20_implicit; // expected-error {{thread-local variable has non-trivial ownership: type is '__strong id'}}
+  static __thread __strong id test20_strong; // expected-error {{thread-local variable has non-trivial ownership: type is '__strong id'}}
+  static __thread __weak id test20_weak; // expected-error {{thread-local variable has non-trivial ownership: type is '__weak id'}}
+  static __thread __autoreleasing id test20_autoreleasing; // expected-error {{thread-local variable has non-trivial ownership: type is '__autoreleasing id'}} expected-error {{global variables cannot have __autoreleasing ownership}}
   static __thread __unsafe_unretained id test20_unsafe;
 }
 
@@ -415,7 +429,7 @@ _Bool fn(id obj) {
     return (_Bool)obj;
 }
 
-// Check casting w/ lifetime qualifiers.
+// Check casting w/ ownership qualifiers.
 void test21() {
   __strong id *sip;
   (void)(__weak id *)sip; // expected-error{{casting '__strong id *' to type '__weak id *' changes retain/release properties of pointer}}
@@ -425,7 +439,7 @@ void test21() {
 }
 
 // rdar://problem/9340462
-void test22(id x[]) { // expected-error {{must explicitly describe intended lifetime of an object array parameter}}
+void test22(id x[]) { // expected-error {{must explicitly describe intended ownership of an object array parameter}}
 }
 
 // rdar://problem/9400219
@@ -464,7 +478,7 @@ void test25(Class *classes) {
 
 void test26(id y) {
   extern id test26_var1;
-  __sync_swap(&test26_var1, 0, y); // expected-error {{cannot perform atomic operation on a pointer to type '__strong id': type has non-trivial lifetime}}
+  __sync_swap(&test26_var1, 0, y); // expected-error {{cannot perform atomic operation on a pointer to type '__strong id': type has non-trivial ownership}}
 
   extern __unsafe_unretained id test26_var2;
   __sync_swap(&test26_var2, 0, y);
@@ -483,9 +497,30 @@ void test26(id y) {
 @end
 
 // rdar://9525555
-@interface  Test27
-@property id x; // expected-error {{ARC forbids properties of Objective-C objects with unspecified storage attribute}}
+@interface  Test27 {
+  __weak id _myProp1;
+  id myProp2;
+}
+@property id x;
+@property (readonly) id ro;
+@property (readonly) id custom_ro;
 @property int y;
+
+@property (readonly) __weak id myProp1;
+@property (readonly) id myProp2;
+@property (readonly) __strong id myProp3;
+@end
+
+@implementation Test27
+@synthesize x;
+@synthesize ro;
+@synthesize y;
+
+@synthesize myProp1 = _myProp1;
+@synthesize myProp2;
+@synthesize myProp3;
+
+-(id)custom_ro { return 0; }
 @end
 
 // rdar://9569264
@@ -518,18 +553,18 @@ typedef struct Bark Bark;
 
 // rdar://9495837
 @interface Test30
-- (id) new;
++ (id) new;
 - (void)Meth;
 @end
 
 @implementation Test30
-- (id) new { return 0; }
++ (id) new { return 0; }
 - (void) Meth {
-  __weak id x = [Test30 new]; // expected-warning {{cannot assign retained object to weak variable}}
-  id __unsafe_unretained u = [Test30 new]; // expected-warning {{cannot assign retained object to unsafe_unretained variable}}
+  __weak id x = [Test30 new]; // expected-warning {{assigning retained object to weak variable}}
+  id __unsafe_unretained u = [Test30 new]; // expected-warning {{assigning retained object to unsafe_unretained variable}}
   id y = [Test30 new];
-  x = [Test30 new]; // expected-warning {{cannot assign retained object to weak variable}}
-  u = [Test30 new]; // expected-warning {{cannot assign retained object to unsafe_unretained variable}}
+  x = [Test30 new]; // expected-warning {{assigning retained object to weak variable}}
+  u = [Test30 new]; // expected-warning {{assigning retained object to unsafe_unretained variable}}
   y = [Test30 new];
 }
 @end
@@ -562,4 +597,101 @@ id Test32(__weak ITest32 *x) {
   return y ? y->ivar     // expected-error {{dereferencing a __weak pointer is not allowed}}
            : (*x).ivar;  // expected-error {{dereferencing a __weak pointer is not allowed}}
 }
+
+// rdar://9619861
+extern int printf(const char*, ...);
+typedef long intptr_t;
+
+int Test33(id someid) {
+  printf( "Hello%ld", (intptr_t)someid);
+  return (int)someid;
+}
+
+// rdar://9636091
+@interface I34
+@property (nonatomic, retain) id newName __attribute__((ns_returns_not_retained)) ;
+
+@property (nonatomic, retain) id newName1 __attribute__((ns_returns_not_retained)) ;
+- (id) newName1 __attribute__((ns_returns_not_retained));
+
+@property (nonatomic, retain) id newName2 __attribute__((ns_returns_not_retained)); // expected-note {{roperty declared here}}
+- (id) newName2;   // expected-warning {{property declared as returning non-retained objects; getter returning retained objects}}
+@end
+
+@implementation I34
+@synthesize newName;
+
+@synthesize newName1;
+- (id) newName1 { return 0; }
+
+@synthesize newName2;
+@end
+
+void test35(void) {
+  extern void test36_helper(id*);
+  id x;
+  __strong id *xp = 0;
+
+  test36_helper(&x);
+  test36_helper(xp); // expected-error {{passing address of non-local object to __autoreleasing parameter for write-back}}
+
+  // rdar://problem/9665710
+  __block id y;
+  test36_helper(&y);
+  ^{ test36_helper(&y); }();
+
+  __strong int non_objc_type; // expected-warning {{'__strong' only applies to objective-c object or block pointer types}} 
+}
+
+void test36(int first, ...) {
+  // <rdar://problem/9758798>
+  __builtin_va_list arglist;
+  __builtin_va_start(arglist, first);
+  id obj = __builtin_va_arg(arglist, id);
+  __builtin_va_end(arglist);
+}
+
+@class Test37; // expected-note{{forward declaration of class here}}
+void test37(Test37 *c) {
+  for (id y in c) { // expected-error {{collection expression type 'Test37' is a forward declaration}}
+    (void) y;
+  }
+
+  (void)sizeof(id*); // no error.
+}
+
+// rdar://problem/9887979
+@interface Test38
+@property int value;
+@end
+void test38() {
+  extern Test38 *test38_helper(void);
+  switch (test38_helper().value) {
+  case 0:
+  case 1:
+    ;
+  }
+}
+
+// rdar://10186536
+@class NSColor;
+void _NSCalc(NSColor* color, NSColor* bezelColors[]) __attribute__((unavailable("not available in automatic reference counting mode")));
+
+void _NSCalcBeze(NSColor* color, NSColor* bezelColors[]); // expected-error {{must explicitly describe intended ownership of an object array parameter}}
+
+// rdar://9970739
+@interface RestaurantTableViewCell
+- (void) restaurantLocation;
+@end
+
+@interface Radar9970739
+- (void) Meth;
+@end
+
+@implementation Radar9970739
+- (void) Meth { 
+  RestaurantTableViewCell *cell;
+  [cell restaurantLocatoin]; // expected-error {{no visible @interface for 'RestaurantTableViewCell' declares the selector 'restaurantLocatoin'}}
+}
+@end
 

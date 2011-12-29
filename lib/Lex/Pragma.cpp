@@ -54,11 +54,11 @@ PragmaNamespace::~PragmaNamespace() {
 /// specified name.  If not, return the handler for the null identifier if it
 /// exists, otherwise return null.  If IgnoreNull is true (the default) then
 /// the null handler isn't returned on failure to match.
-PragmaHandler *PragmaNamespace::FindHandler(llvm::StringRef Name,
+PragmaHandler *PragmaNamespace::FindHandler(StringRef Name,
                                             bool IgnoreNull) const {
   if (PragmaHandler *Handler = Handlers.lookup(Name))
     return Handler;
-  return IgnoreNull ? 0 : Handlers.lookup(llvm::StringRef());
+  return IgnoreNull ? 0 : Handlers.lookup(StringRef());
 }
 
 void PragmaNamespace::AddPragma(PragmaHandler *Handler) {
@@ -85,7 +85,7 @@ void PragmaNamespace::HandlePragma(Preprocessor &PP,
   // Get the handler for this token.  If there is no handler, ignore the pragma.
   PragmaHandler *Handler
     = FindHandler(Tok.getIdentifierInfo() ? Tok.getIdentifierInfo()->getName()
-                                          : llvm::StringRef(),
+                                          : StringRef(),
                   /*IgnoreNull=*/false);
   if (Handler == 0) {
     PP.Diag(Tok, diag::warn_pragma_ignored);
@@ -210,7 +210,7 @@ void Preprocessor::HandleMicrosoft__pragma(Token &Tok) {
   }
 
   // Get the tokens enclosed within the __pragma(), as well as the final ')'.
-  llvm::SmallVector<Token, 32> PragmaToks;
+  SmallVector<Token, 32> PragmaToks;
   int NumParens = 0;
   Lex(Tok);
   while (Tok.isNot(tok::eof)) {
@@ -304,6 +304,8 @@ void Preprocessor::HandlePragmaPoison(Token &PoisonTok) {
 
     // Finally, poison it!
     II->setIsPoisoned();
+    if (II->isFromAST())
+      II->setChangedSinceDeserialization();
   }
 }
 
@@ -326,9 +328,7 @@ void Preprocessor::HandlePragmaSystemHeader(Token &SysHeaderTok) {
   if (PLoc.isInvalid())
     return;
   
-  unsigned FilenameLen = strlen(PLoc.getFilename());
-  unsigned FilenameID = SourceMgr.getLineTableFilenameID(PLoc.getFilename(),
-                                                         FilenameLen);
+  unsigned FilenameID = SourceMgr.getLineTableFilenameID(PLoc.getFilename());
 
   // Notify the client, if desired, that we are in a new source file.
   if (Callbacks)
@@ -355,7 +355,7 @@ void Preprocessor::HandlePragmaDependency(Token &DependencyTok) {
   // Reserve a buffer to get the spelling.
   llvm::SmallString<128> FilenameBuffer;
   bool Invalid = false;
-  llvm::StringRef Filename = getSpelling(FilenameTok, FilenameBuffer, &Invalid);
+  StringRef Filename = getSpelling(FilenameTok, FilenameBuffer, &Invalid);
   if (Invalid)
     return;
 
@@ -368,9 +368,11 @@ void Preprocessor::HandlePragmaDependency(Token &DependencyTok) {
 
   // Search include directories for this file.
   const DirectoryLookup *CurDir;
-  const FileEntry *File = LookupFile(Filename, isAngled, 0, CurDir, NULL, NULL);
+  const FileEntry *File = LookupFile(Filename, isAngled, 0, CurDir, NULL, NULL,
+                                     NULL);
   if (File == 0) {
-    Diag(FilenameTok, diag::err_pp_file_not_found) << Filename;
+    if (!SuppressIncludeNotFoundError)
+      Diag(FilenameTok, diag::err_pp_file_not_found) << Filename;
     return;
   }
 
@@ -438,7 +440,7 @@ void Preprocessor::HandlePragmaComment(Token &Tok) {
     // String concatenation allows multiple strings, which can even come from
     // macro expansion.
     // "foo " "bar" "Baz"
-    llvm::SmallVector<Token, 4> StrToks;
+    SmallVector<Token, 4> StrToks;
     while (Tok.is(tok::string_literal)) {
       StrToks.push_back(Tok);
       Lex(Tok);
@@ -446,7 +448,7 @@ void Preprocessor::HandlePragmaComment(Token &Tok) {
 
     // Concatenate and parse the strings.
     StringLiteralParser Literal(&StrToks[0], StrToks.size(), *this);
-    assert(!Literal.AnyWide && "Didn't allow wide strings in");
+    assert(Literal.isAscii() && "Didn't allow wide strings in");
     if (Literal.hadError)
       return;
     if (Literal.Pascal) {
@@ -454,8 +456,7 @@ void Preprocessor::HandlePragmaComment(Token &Tok) {
       return;
     }
 
-    ArgumentString = std::string(Literal.GetString(),
-                                 Literal.GetString()+Literal.GetStringLength());
+    ArgumentString = Literal.GetString();
   }
 
   // FIXME: If the kind is "compiler" warn if the string is present (it is
@@ -515,7 +516,7 @@ void Preprocessor::HandlePragmaMessage(Token &Tok) {
   // String concatenation allows multiple strings, which can even come from
   // macro expansion.
   // "foo " "bar" "Baz"
-  llvm::SmallVector<Token, 4> StrToks;
+  SmallVector<Token, 4> StrToks;
   while (Tok.is(tok::string_literal)) {
     StrToks.push_back(Tok);
     Lex(Tok);
@@ -523,7 +524,7 @@ void Preprocessor::HandlePragmaMessage(Token &Tok) {
 
   // Concatenate and parse the strings.
   StringLiteralParser Literal(&StrToks[0], StrToks.size(), *this);
-  assert(!Literal.AnyWide && "Didn't allow wide strings in");
+  assert(Literal.isAscii() && "Didn't allow wide strings in");
   if (Literal.hadError)
     return;
   if (Literal.Pascal) {
@@ -531,7 +532,7 @@ void Preprocessor::HandlePragmaMessage(Token &Tok) {
     return;
   }
 
-  llvm::StringRef MessageString(Literal.GetString(), Literal.GetStringLength());
+  StringRef MessageString(Literal.GetString());
 
   if (ExpectClosingParen) {
     if (Tok.isNot(tok::r_paren)) {
@@ -665,7 +666,7 @@ void Preprocessor::HandlePragmaPopMacro(Token &PopMacroTok) {
 /// AddPragmaHandler - Add the specified pragma handler to the preprocessor.
 /// If 'Namespace' is non-null, then it is a token required to exist on the
 /// pragma line before the pragma string starts, e.g. "STDC" or "GCC".
-void Preprocessor::AddPragmaHandler(llvm::StringRef Namespace,
+void Preprocessor::AddPragmaHandler(StringRef Namespace,
                                     PragmaHandler *Handler) {
   PragmaNamespace *InsertNS = PragmaHandlers;
 
@@ -696,7 +697,7 @@ void Preprocessor::AddPragmaHandler(llvm::StringRef Namespace,
 /// preprocessor. If \arg Namespace is non-null, then it should be the
 /// namespace that \arg Handler was added to. It is an error to remove
 /// a handler that has not been registered.
-void Preprocessor::RemovePragmaHandler(llvm::StringRef Namespace,
+void Preprocessor::RemovePragmaHandler(StringRef Namespace,
                                        PragmaHandler *Handler) {
   PragmaNamespace *NS = PragmaHandlers;
 
@@ -805,7 +806,7 @@ struct PragmaDebugHandler : public PragmaHandler {
     IdentifierInfo *II = Tok.getIdentifierInfo();
 
     if (II->isStr("assert")) {
-      assert(0 && "This is an assertion!");
+      llvm_unreachable("This is an assertion!");
     } else if (II->isStr("crash")) {
       *(volatile int*) 0x11 = 0;
     } else if (II->isStr("llvm_fatal_error")) {
@@ -839,8 +840,11 @@ struct PragmaDebugHandler : public PragmaHandler {
 
 /// PragmaDiagnosticHandler - e.g. '#pragma GCC diagnostic ignored "-Wformat"'
 struct PragmaDiagnosticHandler : public PragmaHandler {
+private:
+  const char *Namespace;
 public:
-  explicit PragmaDiagnosticHandler() : PragmaHandler("diagnostic") {}
+  explicit PragmaDiagnosticHandler(const char *NS) :
+    PragmaHandler("diagnostic"), Namespace(NS) {}
   virtual void HandlePragma(Preprocessor &PP, PragmaIntroducerKind Introducer,
                             Token &DiagToken) {
     SourceLocation DiagLoc = DiagToken.getLocation();
@@ -851,6 +855,7 @@ public:
       return;
     }
     IdentifierInfo *II = Tok.getIdentifierInfo();
+    PPCallbacks *Callbacks = PP.getPPCallbacks();
 
     diag::Mapping Map;
     if (II->isStr("warning"))
@@ -864,10 +869,13 @@ public:
     else if (II->isStr("pop")) {
       if (!PP.getDiagnostics().popMappings(DiagLoc))
         PP.Diag(Tok, diag::warn_pragma_diagnostic_cannot_pop);
-
+      else if (Callbacks)
+        Callbacks->PragmaDiagnosticPop(DiagLoc, Namespace);
       return;
     } else if (II->isStr("push")) {
       PP.getDiagnostics().pushMappings(DiagLoc);
+      if (Callbacks)
+        Callbacks->PragmaDiagnosticPush(DiagLoc, Namespace);
       return;
     } else {
       PP.Diag(Tok, diag::warn_pragma_diagnostic_invalid);
@@ -885,7 +893,7 @@ public:
     // String concatenation allows multiple strings, which can even come from
     // macro expansion.
     // "foo " "bar" "Baz"
-    llvm::SmallVector<Token, 4> StrToks;
+    SmallVector<Token, 4> StrToks;
     while (Tok.is(tok::string_literal)) {
       StrToks.push_back(Tok);
       PP.LexUnexpandedToken(Tok);
@@ -898,7 +906,7 @@ public:
 
     // Concatenate and parse the strings.
     StringLiteralParser Literal(&StrToks[0], StrToks.size(), PP);
-    assert(!Literal.AnyWide && "Didn't allow wide strings in");
+    assert(Literal.isAscii() && "Didn't allow wide strings in");
     if (Literal.hadError)
       return;
     if (Literal.Pascal) {
@@ -906,7 +914,7 @@ public:
       return;
     }
 
-    llvm::StringRef WarningName(Literal.GetString(), Literal.GetStringLength());
+    StringRef WarningName(Literal.GetString());
 
     if (WarningName.size() < 3 || WarningName[0] != '-' ||
         WarningName[1] != 'W') {
@@ -919,6 +927,8 @@ public:
                                                       Map, DiagLoc))
       PP.Diag(StrToks[0].getLocation(),
               diag::warn_pragma_diagnostic_unknown_warning) << WarningName;
+    else if (Callbacks)
+      Callbacks->PragmaDiagnostic(DiagLoc, Namespace, Map, WarningName);
   }
 };
 
@@ -997,6 +1007,60 @@ struct PragmaSTDC_UnknownHandler : public PragmaHandler {
   }
 };
 
+/// PragmaARCCFCodeAuditedHandler - 
+///   #pragma clang arc_cf_code_audited begin/end
+struct PragmaARCCFCodeAuditedHandler : public PragmaHandler {
+  PragmaARCCFCodeAuditedHandler() : PragmaHandler("arc_cf_code_audited") {}
+  virtual void HandlePragma(Preprocessor &PP, PragmaIntroducerKind Introducer,
+                            Token &NameTok) {
+    SourceLocation Loc = NameTok.getLocation();
+    bool IsBegin;
+
+    Token Tok;
+
+    // Lex the 'begin' or 'end'.
+    PP.LexUnexpandedToken(Tok);
+    const IdentifierInfo *BeginEnd = Tok.getIdentifierInfo();
+    if (BeginEnd && BeginEnd->isStr("begin")) {
+      IsBegin = true;
+    } else if (BeginEnd && BeginEnd->isStr("end")) {
+      IsBegin = false;
+    } else {
+      PP.Diag(Tok.getLocation(), diag::err_pp_arc_cf_code_audited_syntax);
+      return;
+    }
+
+    // Verify that this is followed by EOD.
+    PP.LexUnexpandedToken(Tok);
+    if (Tok.isNot(tok::eod))
+      PP.Diag(Tok, diag::ext_pp_extra_tokens_at_eol) << "pragma";
+
+    // The start location of the active audit.
+    SourceLocation BeginLoc = PP.getPragmaARCCFCodeAuditedLoc();
+
+    // The start location we want after processing this.
+    SourceLocation NewLoc;
+
+    if (IsBegin) {
+      // Complain about attempts to re-enter an audit.
+      if (BeginLoc.isValid()) {
+        PP.Diag(Loc, diag::err_pp_double_begin_of_arc_cf_code_audited);
+        PP.Diag(BeginLoc, diag::note_pragma_entered_here);
+      }
+      NewLoc = Loc;
+    } else {
+      // Complain about attempts to leave an audit that doesn't exist.
+      if (!BeginLoc.isValid()) {
+        PP.Diag(Loc, diag::err_pp_unmatched_end_of_arc_cf_code_audited);
+        return;
+      }
+      NewLoc = SourceLocation();
+    }
+
+    PP.setPragmaARCCFCodeAuditedLoc(NewLoc);
+  }
+};
+
 }  // end anonymous namespace
 
 
@@ -1013,20 +1077,21 @@ void Preprocessor::RegisterBuiltinPragmas() {
   AddPragmaHandler("GCC", new PragmaPoisonHandler());
   AddPragmaHandler("GCC", new PragmaSystemHeaderHandler());
   AddPragmaHandler("GCC", new PragmaDependencyHandler());
-  AddPragmaHandler("GCC", new PragmaDiagnosticHandler());
+  AddPragmaHandler("GCC", new PragmaDiagnosticHandler("GCC"));
   // #pragma clang ...
   AddPragmaHandler("clang", new PragmaPoisonHandler());
   AddPragmaHandler("clang", new PragmaSystemHeaderHandler());
   AddPragmaHandler("clang", new PragmaDebugHandler());
   AddPragmaHandler("clang", new PragmaDependencyHandler());
-  AddPragmaHandler("clang", new PragmaDiagnosticHandler());
+  AddPragmaHandler("clang", new PragmaDiagnosticHandler("clang"));
+  AddPragmaHandler("clang", new PragmaARCCFCodeAuditedHandler());
 
   AddPragmaHandler("STDC", new PragmaSTDC_FENV_ACCESSHandler());
   AddPragmaHandler("STDC", new PragmaSTDC_CX_LIMITED_RANGEHandler());
   AddPragmaHandler("STDC", new PragmaSTDC_UnknownHandler());
 
   // MS extensions.
-  if (Features.Microsoft) {
+  if (Features.MicrosoftExt) {
     AddPragmaHandler(new PragmaCommentHandler());
   }
 }

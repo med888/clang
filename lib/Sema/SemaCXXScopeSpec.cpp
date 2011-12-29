@@ -137,8 +137,7 @@ DeclContext *Sema::computeDeclContext(const CXXScopeSpec &SS,
 
   switch (NNS->getKind()) {
   case NestedNameSpecifier::Identifier:
-    assert(false && "Dependent nested-name-specifier has no DeclContext");
-    break;
+    llvm_unreachable("Dependent nested-name-specifier has no DeclContext");
 
   case NestedNameSpecifier::Namespace:
     return NNS->getAsNamespace();
@@ -211,24 +210,39 @@ bool Sema::RequireCompleteDeclContext(CXXScopeSpec &SS,
                                       DeclContext *DC) {
   assert(DC != 0 && "given null context");
 
-  if (TagDecl *Tag = dyn_cast<TagDecl>(DC)) {
+  if (TagDecl *tag = dyn_cast<TagDecl>(DC)) {
     // If this is a dependent type, then we consider it complete.
-    if (Tag->isDependentContext())
+    if (tag->isDependentContext())
       return false;
 
     // If we're currently defining this type, then lookup into the
     // type is okay: don't complain that it isn't complete yet.
-    const TagType *TagT = Context.getTypeDeclType(Tag)->getAs<TagType>();
-    if (TagT && TagT->isBeingDefined())
+    QualType type = Context.getTypeDeclType(tag);
+    const TagType *tagType = type->getAs<TagType>();
+    if (tagType && tagType->isBeingDefined())
       return false;
 
+    SourceLocation loc = SS.getLastQualifierNameLoc();
+    if (loc.isInvalid()) loc = SS.getRange().getBegin();
+
     // The type must be complete.
-    if (RequireCompleteType(SS.getRange().getBegin(),
-                            Context.getTypeDeclType(Tag),
+    if (RequireCompleteType(loc, type,
                             PDiag(diag::err_incomplete_nested_name_spec)
                               << SS.getRange())) {
       SS.SetInvalid(SS.getRange());
       return true;
+    }
+
+    // Fixed enum types are complete, but they aren't valid as scopes
+    // until we see a definition, so awkwardly pull out this special
+    // case.
+    if (const EnumType *enumType = dyn_cast_or_null<EnumType>(tagType)) {
+      if (!enumType->getDecl()->isCompleteDefinition()) {
+        Diag(loc, diag::err_incomplete_nested_name_spec)
+          << type << SS.getRange();
+        SS.SetInvalid(SS.getRange());
+        return true;
+      }
     }
   }
 
@@ -254,7 +268,7 @@ bool Sema::isAcceptableNestedNameSpecifier(NamedDecl *SD) {
   if (!isa<TypeDecl>(SD))
     return false;
 
-  // Determine whether we have a class (or, in C++0x, an enum) or
+  // Determine whether we have a class (or, in C++11, an enum) or
   // a typedef thereof. If so, build the nested-name-specifier.
   QualType T = Context.getTypeDeclType(cast<TypeDecl>(SD));
   if (T->isDependentType())
@@ -464,26 +478,29 @@ bool Sema::BuildCXXNestedNameSpecifier(Scope *S,
     // We haven't found anything, and we're not recovering from a
     // different kind of error, so look for typos.
     DeclarationName Name = Found.getLookupName();
-    if (CorrectTypo(Found, S, &SS, LookupCtx, EnteringContext,  
-                    CTC_NoKeywords) &&
-        Found.isSingleResult() &&
-        isAcceptableNestedNameSpecifier(Found.getAsSingle<NamedDecl>())) {
+    TypoCorrection Corrected;
+    Found.clear();
+    if ((Corrected = CorrectTypo(Found.getLookupNameInfo(),
+                                 Found.getLookupKind(), S, &SS, LookupCtx,
+                                 EnteringContext, CTC_NoKeywords)) &&
+        isAcceptableNestedNameSpecifier(Corrected.getCorrectionDecl())) {
+      std::string CorrectedStr(Corrected.getAsString(getLangOptions()));
+      std::string CorrectedQuotedStr(Corrected.getQuoted(getLangOptions()));
       if (LookupCtx)
         Diag(Found.getNameLoc(), diag::err_no_member_suggest)
-          << Name << LookupCtx << Found.getLookupName() << SS.getRange()
-          << FixItHint::CreateReplacement(Found.getNameLoc(),
-                                          Found.getLookupName().getAsString());
+          << Name << LookupCtx << CorrectedQuotedStr << SS.getRange()
+          << FixItHint::CreateReplacement(Found.getNameLoc(), CorrectedStr);
       else
         Diag(Found.getNameLoc(), diag::err_undeclared_var_use_suggest)
-          << Name << Found.getLookupName()
-          << FixItHint::CreateReplacement(Found.getNameLoc(),
-                                          Found.getLookupName().getAsString());
+          << Name << CorrectedQuotedStr
+          << FixItHint::CreateReplacement(Found.getNameLoc(), CorrectedStr);
       
-      if (NamedDecl *ND = Found.getAsSingle<NamedDecl>())
-        Diag(ND->getLocation(), diag::note_previous_decl)
-          << ND->getDeclName();
+      if (NamedDecl *ND = Corrected.getCorrectionDecl()) {
+        Diag(ND->getLocation(), diag::note_previous_decl) << CorrectedQuotedStr;
+        Found.addDecl(ND);
+      }
+      Found.setLookupName(Corrected.getCorrection());
     } else {
-      Found.clear();
       Found.setLookupName(&Identifier);
     }
   }
@@ -579,6 +596,9 @@ bool Sema::BuildCXXNestedNameSpecifier(Scope *S,
       llvm_unreachable("Unhandled TypeDecl node in nested-name-specifier");
     }
 
+    if (T->isEnumeralType())
+      Diag(IdentifierLoc, diag::warn_cxx98_compat_enum_nested_name_spec);
+
     SS.Extend(Context, SourceLocation(), TLB.getTypeLocInContext(Context, T),
               CCLoc);
     return false;
@@ -595,6 +615,31 @@ bool Sema::BuildCXXNestedNameSpecifier(Scope *S,
   if (Found.empty()) {
     Found.clear(LookupOrdinaryName);
     LookupName(Found, S);
+  }
+
+  // In Microsoft mode, if we are within a templated function and we can't
+  // resolve Identifier, then extend the SS with Identifier. This will have 
+  // the effect of resolving Identifier during template instantiation. 
+  // The goal is to be able to resolve a function call whose
+  // nested-name-specifier is located inside a dependent base class.
+  // Example: 
+  //
+  // class C {
+  // public:
+  //    static void foo2() {  }
+  // };
+  // template <class T> class A { public: typedef C D; };
+  //
+  // template <class T> class B : public A<T> {
+  // public:
+  //   void foo() { D::foo2(); }
+  // };
+  if (getLangOptions().MicrosoftExt) {
+    DeclContext *DC = LookupCtx ? LookupCtx : CurContext;
+    if (DC->isDependentContext() && DC->isFunctionOrMethod()) {
+      SS.Extend(Context, &Identifier, IdentifierLoc, CCLoc);
+      return false;
+    }
   }
 
   unsigned DiagID;
@@ -629,6 +674,29 @@ bool Sema::ActOnCXXNestedNameSpecifier(Scope *S,
                                      GetTypeFromParser(ObjectType),
                                      EnteringContext, SS, 
                                      /*ScopeLookupResult=*/0, false);
+}
+
+bool Sema::ActOnCXXNestedNameSpecifierDecltype(CXXScopeSpec &SS,
+                                               const DeclSpec &DS,
+                                               SourceLocation ColonColonLoc) {
+  if (SS.isInvalid() || DS.getTypeSpecType() == DeclSpec::TST_error)
+    return true;
+
+  assert(DS.getTypeSpecType() == DeclSpec::TST_decltype);
+
+  QualType T = BuildDecltypeType(DS.getRepAsExpr(), DS.getTypeSpecTypeLoc());
+  if (!T->isDependentType() && !T->getAs<TagType>()) {
+    Diag(DS.getTypeSpecTypeLoc(), diag::err_expected_class) 
+      << T << getLangOptions().CPlusPlus;
+    return true;
+  }
+
+  TypeLocBuilder TLB;
+  DecltypeTypeLoc DecltypeTL = TLB.push<DecltypeTypeLoc>(T);
+  DecltypeTL.setNameLoc(DS.getTypeSpecTypeLoc());
+  SS.Extend(Context, SourceLocation(), TLB.getTypeLocInContext(Context, T),
+            ColonColonLoc);
+  return false;
 }
 
 /// IsInvalidUnlessNestedName - This method is used for error recovery

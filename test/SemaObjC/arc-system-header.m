@@ -1,6 +1,6 @@
 // silly workaround expected-note {{marked unavailable here}}
-// RUN: %clang_cc1 -fobjc-arc -fobjc-nonfragile-abi -isystem %S/Inputs %s -DNO_USE
-// RUN: %clang_cc1 -fobjc-arc -fobjc-nonfragile-abi -isystem %S/Inputs %s -verify
+// RUN: %clang_cc1 -fobjc-arc -isystem %S/Inputs %s -DNO_USE
+// RUN: %clang_cc1 -fobjc-arc -isystem %S/Inputs %s -verify
 
 // another silly workaround expected-note {{marked unavailable here}}
 #include <arc-system-header.h>
@@ -24,7 +24,7 @@ void test4(Test4 *p) {
 
 // workaround expected-note {{marked unavailable here}}
 void test5(struct Test5 *p) {
-  p->field = 0; // expected-error {{'field' is unavailable: this system field has retaining lifetime}}
+  p->field = 0; // expected-error {{'field' is unavailable: this system field has retaining ownership}}
 }
 
 id test6() {

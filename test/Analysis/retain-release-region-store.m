@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -analyze -analyzer-checker=core -analyzer-store=region -analyzer-max-loop 6 -verify %s
+// RUN: %clang_cc1 -analyze -analyzer-checker=core,osx.cocoa.RetainCount -analyzer-store=region -analyzer-max-loop 6 -verify %s
 
 //===----------------------------------------------------------------------===//
 // The following code is reduced using delta-debugging from
@@ -110,7 +110,7 @@ CFAbsoluteTime f4() {
   CFDateGetAbsoluteTime(date); // no-warning
   x.f = (NSDate*) date;  
   [((NSDate*) date) release];
-  t = CFDateGetAbsoluteTime(date);   // expected-warning{{Reference-counted object is used after it is released.}}
+  t = CFDateGetAbsoluteTime(date);   // expected-warning{{Reference-counted object is used after it is released}}
   return t;
 }
 

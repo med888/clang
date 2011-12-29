@@ -16,8 +16,9 @@ void test() {
   for (;s;) ; // expected-error {{value of type 'struct S' is not contextually convertible to 'bool'}}
   switch (s) {} // expected-error {{statement requires expression of integer type ('struct S' invalid)}}
 
-  while (struct S {} x=0) ; // expected-error {{types may not be defined in conditions}} expected-error {{no viable conversion}} expected-error {{value of type 'struct S' is not contextually convertible to 'bool'}} expected-note{{candidate constructor (the implicit copy constructor)}}
-  while (struct {} x=0) ; // expected-error {{types may not be defined in conditions}} expected-error {{no viable conversion}} expected-error {{not contextually convertible to 'bool'}} expected-note{{candidate constructor (the implicit copy constructor)}}
+  while (struct NewS *x=0) ;
+  while (struct S {} *x=0) ; // expected-error {{types may not be defined in conditions}}
+  while (struct {} *x=0) ; // expected-error {{types may not be defined in conditions}}
   switch (enum {E} x=0) ; // expected-error {{types may not be defined in conditions}} expected-error {{cannot initialize}} \
   // expected-warning{{enumeration value 'E' not handled in switch}}
 
@@ -48,6 +49,11 @@ void test3() {
   if ("help")
     (void) 0;
 
-  if (test3)
+  if (test3) // expected-warning {{address of function 'test3' will always evaluate to 'true'}} \
+                expected-note {{prefix with the address-of operator to silence this warning}}
     (void) 0;
+}
+
+void test4(bool (&x)(void)) {
+  while (x);
 }

@@ -1,4 +1,7 @@
-// RUN: %clang_cc1 -triple x86_64-apple-darwin10 -emit-llvm -fobjc-nonfragile-abi -fblocks -fobjc-arc -O2 -disable-llvm-optzns -o - %s | FileCheck %s
+// RUN: %clang_cc1 -triple x86_64-apple-darwin10 -emit-llvm -fobjc-runtime-has-weak -fblocks -fobjc-arc -O2 -disable-llvm-optzns -o - %s | FileCheck %s
+
+@interface A
+@end
 
 id getObject();
 void callee();
@@ -41,6 +44,34 @@ void test3() {
   // CHECK-NEXT: call void @_Z6calleev()
   callee();
   // CHECK-NEXT: call void @objc_destroyWeak
+  // CHECK-NEXT: ret void
+}
+
+// CHECK: define void @_Z5test4RU8__strongP11objc_object
+void test4(__strong id &x) {
+  // CHECK: call i8* @objc_retain
+  __strong A* const &ar = x;
+  // CHECK: store i32 17, i32*
+  int i = 17;
+  // CHECK: call void @objc_release(
+  // CHECK: ret void
+}
+
+void sink(__strong A* &&);
+
+// CHECK: define void @_Z5test5RU8__strongP11objc_object
+void test5(__strong id &x) {
+  // CHECK:      [[REFTMP:%.*]] = alloca {{%.*}}*, align 8
+  // CHECK:      [[OBJ_ID:%.*]] = call i8* @objc_retain(
+  // CHECK-NEXT: [[OBJ_A:%.*]] = bitcast i8* [[OBJ_ID]] to [[A:%[a-zA-Z0-9]+]]*
+  // CHECK-NEXT: store [[A]]* [[OBJ_A]], [[A]]** [[REFTMP:%[a-zA-Z0-9]+]]
+  // CHECK-NEXT: call void @_Z4sinkOU8__strongP1A
+  sink(x);  
+  // CHECK-NEXT: [[OBJ_A:%[a-zA-Z0-9]+]] = load [[A]]** [[REFTMP]]
+  // CHECK-NEXT: [[OBJ_ID:%[a-zA-Z0-9]+]] = bitcast [[A]]* [[OBJ_A]] to i8*
+  // CHECK-NEXT: call void @objc_release
+  // CHECK-NEXT: store i32 17, i32
+  int i = 17;
   // CHECK-NEXT: ret void
 }
 

@@ -1,7 +1,8 @@
-# TODO: This must need some dependencies, but it builds fine without them.
-#set(LLVM_USED_LIBS ???)
+set(LLVM_USED_LIBS clangSema)
 
 add_clang_library(clangSerialization
+  ASTCommon.h
+  ASTReaderInternals.h
   ASTCommon.cpp
   ASTReader.cpp
   ASTReaderDecl.cpp
@@ -9,8 +10,9 @@ add_clang_library(clangSerialization
   ASTWriter.cpp
   ASTWriterDecl.cpp
   ASTWriterStmt.cpp
-  ChainedIncludesSource.cpp
   GeneratePCH.cpp
+  Module.cpp
+  ModuleManager.cpp
   )
 
 add_dependencies(clangSerialization
@@ -18,8 +20,8 @@ add_dependencies(clangSerialization
   ClangAttrList
   ClangAttrPCHRead
   ClangAttrPCHWrite
-  ClangDiagnosticFrontend
   ClangDiagnosticLex
   ClangDiagnosticSema
+  ClangDiagnosticSerialization
   ClangDeclNodes
   ClangStmtNodes)

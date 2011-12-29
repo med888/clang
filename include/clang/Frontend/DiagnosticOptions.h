@@ -43,21 +43,22 @@ public:
   
   unsigned ShowColors : 1;       /// Show diagnostics with ANSI color sequences.
   unsigned ShowOverloads : 1;    /// Overload candidates to show.  Values from
-                                 /// Diagnostic::OverloadsShown
+                                 /// DiagnosticsEngine::OverloadsShown
   unsigned VerifyDiagnostics: 1; /// Check that diagnostics match the expected
                                  /// diagnostics, indicated by markers in the
                                  /// input source file.
 
   unsigned ErrorLimit;           /// Limit # errors emitted.
-  unsigned MacroBacktraceLimit;  /// Limit depth of macro instantiation 
-                                 /// backtrace.
+  unsigned MacroBacktraceLimit;  /// Limit depth of macro expansion backtrace.
   unsigned TemplateBacktraceLimit; /// Limit depth of instantiation backtrace.
+  unsigned ConstexprBacktraceLimit; /// Limit depth of constexpr backtrace.
 
   /// The distance between tab stops.
   unsigned TabStop;
   enum { DefaultTabStop = 8, MaxTabStop = 100, 
          DefaultMacroBacktraceLimit = 6,
-         DefaultTemplateBacktraceLimit = 10 };
+         DefaultTemplateBacktraceLimit = 10,
+         DefaultConstexprBacktraceLimit = 10 };
 
   /// Column limit for formatting message diagnostics, or 0 if unused.
   unsigned MessageLength;
@@ -68,6 +69,9 @@ public:
 
   /// The file to log diagnostic output to.
   std::string DiagnosticLogFile;
+  
+  /// The file to serialize diagnostics to (non-appending).
+  std::string DiagnosticSerializationFile;
 
   /// The list of -W... options used to alter the diagnostic mappings, with the
   /// prefixes removed.
@@ -83,7 +87,7 @@ public:
     PedanticErrors = 0;
     ShowCarets = 1;
     ShowColors = 0;
-    ShowOverloads = Diagnostic::Ovl_All;
+    ShowOverloads = DiagnosticsEngine::Ovl_All;
     ShowColumn = 1;
     ShowFixits = 1;
     ShowLocation = 1;
@@ -97,6 +101,7 @@ public:
     ErrorLimit = 0;
     TemplateBacktraceLimit = DefaultTemplateBacktraceLimit;
     MacroBacktraceLimit = DefaultMacroBacktraceLimit;
+    ConstexprBacktraceLimit = DefaultConstexprBacktraceLimit;
   }
 };
 

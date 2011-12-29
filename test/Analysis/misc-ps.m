@@ -1,15 +1,11 @@
 // NOTE: Use '-fobjc-gc' to test the analysis being run twice, and multiple reports are not issued.
-// RUN: %clang_cc1 -triple i386-apple-darwin10 -analyze -analyzer-checker=core,deadcode.IdempotentOperations,core.experimental,osx.cocoa.AtSync -analyzer-disable-checker=unix.experimental.Malloc -analyzer-store=basic -fobjc-gc -analyzer-constraints=basic -verify -fblocks -Wno-unreachable-code -Wno-null-dereference %s
-// RUN: %clang_cc1 -triple i386-apple-darwin10 -analyze -analyzer-checker=core,deadcode.IdempotentOperations,core.experimental,osx.cocoa.AtSync -analyzer-disable-checker=unix.experimental.Malloc -analyzer-store=basic -analyzer-constraints=range -verify -fblocks -Wno-unreachable-code -Wno-null-dereference %s
-// RUN: %clang_cc1 -triple i386-apple-darwin10 -analyze -analyzer-checker=core,deadcode.IdempotentOperations,core.experimental,osx.cocoa.AtSync -analyzer-store=region -analyzer-constraints=basic -verify -fblocks -Wno-unreachable-code -Wno-null-dereference %s
-// RUN: %clang_cc1 -triple i386-apple-darwin10 -analyze -analyzer-checker=core,deadcode.IdempotentOperations,core.experimental,osx.cocoa.AtSync -analyzer-store=region -analyzer-constraints=range -verify -fblocks -Wno-unreachable-code -Wno-null-dereference %s
-// RUN: %clang_cc1 -triple x86_64-apple-darwin10 -analyze -analyzer-checker=core,deadcode.IdempotentOperations,core.experimental,osx.cocoa.AtSync -analyzer-disable-checker=unix.experimental.Malloc -analyzer-store=basic -fobjc-gc -analyzer-constraints=basic -verify -fblocks -Wno-unreachable-code -Wno-null-dereference %s
-// RUN: %clang_cc1 -triple x86_64-apple-darwin10 -analyze -analyzer-checker=core,deadcode.IdempotentOperations,core.experimental,osx.cocoa.AtSync -analyzer-disable-checker=unix.experimental.Malloc -analyzer-store=basic -analyzer-constraints=range -verify -fblocks -Wno-unreachable-code -Wno-null-dereference %s
-// RUN: %clang_cc1 -triple x86_64-apple-darwin10 -analyze -analyzer-checker=core,deadcode.IdempotentOperations,core.experimental,osx.cocoa.AtSync -analyzer-store=region -analyzer-constraints=basic -verify -fblocks -Wno-unreachable-code -Wno-null-dereference %s
-// RUN: %clang_cc1 -triple x86_64-apple-darwin10 -analyze -analyzer-checker=core,deadcode.IdempotentOperations,core.experimental,osx.cocoa.AtSync -analyzer-store=region -analyzer-constraints=range -verify -fblocks -Wno-unreachable-code -Wno-null-dereference %s
+// RUN: %clang_cc1 -triple i386-apple-darwin10 -analyze -analyzer-checker=core,deadcode.IdempotentOperations,experimental.core,osx.cocoa.AtSync -analyzer-store=region -analyzer-constraints=basic -verify -fblocks -Wno-unreachable-code -Wno-null-dereference %s
+// RUN: %clang_cc1 -triple i386-apple-darwin10 -analyze -analyzer-checker=core,deadcode.IdempotentOperations,experimental.core,osx.cocoa.AtSync -analyzer-store=region -analyzer-constraints=range -verify -fblocks -Wno-unreachable-code -Wno-null-dereference %s
+// RUN: %clang_cc1 -triple x86_64-apple-darwin10 -analyze -analyzer-checker=core,deadcode.IdempotentOperations,experimental.core,osx.cocoa.AtSync -analyzer-store=region -analyzer-constraints=basic -verify -fblocks -Wno-unreachable-code -Wno-null-dereference %s
+// RUN: %clang_cc1 -triple x86_64-apple-darwin10 -analyze -analyzer-checker=core,deadcode.IdempotentOperations,experimental.core,osx.cocoa.AtSync -analyzer-store=region -analyzer-constraints=range -verify -fblocks -Wno-unreachable-code -Wno-null-dereference %s
 
 #ifndef __clang_analyzer__
-#error __clang__analyzer__ not defined
+#error __clang_analyzer__ not defined
 #endif
 
 typedef struct objc_ivar *Ivar;
@@ -276,6 +272,17 @@ void rdar_6777003(int x) {
   }
   
   *p = 1; // expected-warning{{Dereference of null pointer}}  
+}
+
+// Check that the pointer-to-conts arguments do not get invalidated by Obj C 
+// interfaces. radar://10595327
+int rdar_10595327(char *str) {
+  char fl = str[0]; 
+  int *p = 0;
+  NSString *s = [NSString stringWithUTF8String:str];
+  if (str[0] != fl)
+      return *p; // no-warning
+  return 0;
 }
 
 // For pointer arithmetic, --/++ should be treated as preserving non-nullness,
@@ -553,7 +560,6 @@ int test_array_compound(int *q, int *r, int *z) {
   return j;
 }
 
-// This test case previously crashed with -analyzer-store=basic because the
 // symbolic value stored in 'x' wouldn't be implicitly casted to a signed value
 // during the comparison.
 int rdar_7124210(unsigned int x) {
@@ -1324,5 +1330,18 @@ void radar9414427() {
 @end
 
 @implementation RDar9465344
+@end
+
+// Don't crash when analyzing access to 'self' within a block.
+@interface Rdar10380300Base 
+- (void) foo;
+@end
+@interface Rdar10380300 : Rdar10380300Base @end
+@implementation Rdar10380300
+- (void)foo {
+  ^{
+    [super foo];
+  }();
+}
 @end
 

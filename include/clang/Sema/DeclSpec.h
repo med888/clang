@@ -34,7 +34,7 @@ namespace clang {
   class ASTContext;
   class TypeLoc;
   class LangOptions;
-  class Diagnostic;
+  class DiagnosticsEngine;
   class IdentifierInfo;
   class NamespaceAliasDecl;
   class NamespaceDecl;
@@ -42,6 +42,7 @@ namespace clang {
   class NestedNameSpecifierLoc;
   class ObjCDeclSpec;
   class Preprocessor;
+  class Sema;
   class Declarator;
   struct TemplateIdAnnotation;
 
@@ -154,6 +155,12 @@ public:
   /// copied.
   NestedNameSpecifierLoc getWithLocInContext(ASTContext &Context) const;
 
+  /// \brief Retrieve the location of the name in the last qualifier
+  /// in this nested name specifier.  For example:
+  ///   ::foo::bar<0>::
+  ///          ^~~
+  SourceLocation getLastQualifierNameLoc() const;
+
   /// No scope specifier.
   bool isEmpty() const { return !Range.isValid(); }
   /// A scope specifier is present, but may be valid or invalid.
@@ -236,6 +243,7 @@ public:
   static const TST TST_char16 = clang::TST_char16;
   static const TST TST_char32 = clang::TST_char32;
   static const TST TST_int = clang::TST_int;
+  static const TST TST_half = clang::TST_half;
   static const TST TST_float = clang::TST_float;
   static const TST TST_double = clang::TST_double;
   static const TST TST_bool = clang::TST_bool;
@@ -253,6 +261,7 @@ public:
   static const TST TST_underlyingType = clang::TST_underlyingType;
   static const TST TST_auto = clang::TST_auto;
   static const TST TST_unknown_anytype = clang::TST_unknown_anytype;
+  static const TST TST_atomic = clang::TST_atomic;
   static const TST TST_error = clang::TST_error;
 
   // type-qualifiers
@@ -339,7 +348,7 @@ private:
   SourceRange TypeofParensRange;
   SourceLocation TQ_constLoc, TQ_restrictLoc, TQ_volatileLoc;
   SourceLocation FS_inlineLoc, FS_virtualLoc, FS_explicitLoc;
-  SourceLocation FriendLoc, ConstexprLoc;
+  SourceLocation FriendLoc, ModulePrivateLoc, ConstexprLoc;
 
   WrittenBuiltinSpecs writtenBS;
   void SaveWrittenBuiltinSpecs();
@@ -349,7 +358,7 @@ private:
 
   static bool isTypeRep(TST T) {
     return (T == TST_typename || T == TST_typeofType ||
-            T == TST_underlyingType);
+            T == TST_underlyingType || T == TST_atomic);
   }
   static bool isExprRep(TST T) {
     return (T == TST_typeofExpr || T == TST_decltype);
@@ -375,7 +384,7 @@ public:
       TypeAltiVecPixel(false),
       TypeAltiVecBool(false),
       TypeSpecOwned(false),
-      TypeQualifiers(TSS_unspecified),
+      TypeQualifiers(TQ_unspecified),
       FS_inline_specified(false),
       FS_virtual_specified(false),
       FS_explicit_specified(false),
@@ -531,8 +540,8 @@ public:
   ///
   /// TODO: use a more general approach that still allows these
   /// diagnostics to be ignored when desired.
-  bool SetStorageClassSpec(SCS S, SourceLocation Loc, const char *&PrevSpec,
-                           unsigned &DiagID, const LangOptions &Lang);
+  bool SetStorageClassSpec(Sema &S, SCS SC, SourceLocation Loc,
+                           const char *&PrevSpec, unsigned &DiagID);
   bool SetStorageClassSpecThread(SourceLocation Loc, const char *&PrevSpec,
                                  unsigned &DiagID);
   bool SetTypeSpecWidth(TSW W, SourceLocation Loc, const char *&PrevSpec,
@@ -586,13 +595,17 @@ public:
 
   bool SetFriendSpec(SourceLocation Loc, const char *&PrevSpec,
                      unsigned &DiagID);
-
+  bool setModulePrivateSpec(SourceLocation Loc, const char *&PrevSpec,
+                            unsigned &DiagID);
   bool SetConstexprSpec(SourceLocation Loc, const char *&PrevSpec,
                         unsigned &DiagID);
 
   bool isFriendSpecified() const { return Friend_specified; }
   SourceLocation getFriendSpecLoc() const { return FriendLoc; }
 
+  bool isModulePrivateSpecified() const { return ModulePrivateLoc.isValid(); }
+  SourceLocation getModulePrivateSpecLoc() const { return ModulePrivateLoc; }
+  
   bool isConstexprSpecified() const { return Constexpr_specified; }
   SourceLocation getConstexprSpecLoc() const { return ConstexprLoc; }
 
@@ -651,7 +664,7 @@ public:
   /// Finish - This does final analysis of the declspec, issuing diagnostics for
   /// things like "_Imaginary" (lacking an FP type).  After calling this method,
   /// DeclSpec is guaranteed self-consistent, even if an error occurred.
-  void Finish(Diagnostic &D, Preprocessor &PP);
+  void Finish(DiagnosticsEngine &D, Preprocessor &PP);
 
   const WrittenBuiltinSpecs& getWrittenBuiltinSpecs() const {
     return writtenBS;
@@ -726,6 +739,7 @@ public:
   const IdentifierInfo *getSetterName() const { return SetterName; }
   IdentifierInfo *getSetterName() { return SetterName; }
   void setSetterName(IdentifierInfo *name) { SetterName = name; }
+
 private:
   // FIXME: These two are unrelated and mutially exclusive. So perhaps
   // we can put them in a union to reflect their mutual exclusiveness
@@ -761,7 +775,9 @@ public:
     /// \brief A destructor name.
     IK_DestructorName,
     /// \brief A template-id, e.g., f<int>.
-    IK_TemplateId
+    IK_TemplateId,
+    /// \brief An implicit 'self' parameter
+    IK_ImplicitSelfParam
   } Kind;
 
   /// \brief Anonymous union that holds extra data associated with the
@@ -814,7 +830,7 @@ public:
   SourceLocation EndLocation;
   
   UnqualifiedId() : Kind(IK_Identifier), Identifier(0) { }
-  
+
   /// \brief Do not use this copy constructor. It is temporary, and only
   /// exists because we are holding FieldDeclarators in a SmallVector when we
   /// don't actually need them.
@@ -841,6 +857,7 @@ public:
   
   /// \brief Determine what kind of name we have.
   IdKind getKind() const { return Kind; }
+  void setKind(IdKind kind) { Kind = kind; } 
   
   /// \brief Specify that this unqualified-id was parsed as an identifier.
   ///
@@ -952,7 +969,7 @@ public:
   
 /// CachedTokens - A set of tokens that has been cached for later
 /// parsing.
-typedef llvm::SmallVector<Token, 4> CachedTokens;
+typedef SmallVector<Token, 4> CachedTokens;
 
 /// DeclaratorChunk - One instance of this struct is used for each type in a
 /// declarator that is parsed.
@@ -1088,6 +1105,20 @@ struct DeclaratorChunk {
     /// If this is an invalid location, there is no ref-qualifier.
     unsigned RefQualifierLoc;
 
+    /// \brief The location of the const-qualifier, if any.
+    ///
+    /// If this is an invalid location, there is no const-qualifier.
+    unsigned ConstQualifierLoc;
+
+    /// \brief The location of the volatile-qualifier, if any.
+    ///
+    /// If this is an invalid location, there is no volatile-qualifier.
+    unsigned VolatileQualifierLoc;
+
+    /// \brief The location of the 'mutable' qualifer in a lambda-declarator, if
+    /// any.
+    unsigned MutableLoc;
+
     /// \brief When ExceptionSpecType isn't EST_None or EST_Delayed, the
     /// location of the keyword introducing the spec.
     unsigned ExceptionSpecLoc;
@@ -1149,9 +1180,28 @@ struct DeclaratorChunk {
       return SourceLocation::getFromRawEncoding(RefQualifierLoc);
     }
 
+    /// \brief Retrieve the location of the ref-qualifier, if any.
+    SourceLocation getConstQualifierLoc() const {
+      return SourceLocation::getFromRawEncoding(ConstQualifierLoc);
+    }
+
+    /// \brief Retrieve the location of the ref-qualifier, if any.
+    SourceLocation getVolatileQualifierLoc() const {
+      return SourceLocation::getFromRawEncoding(VolatileQualifierLoc);
+    }
+
+    /// \brief Retrieve the location of the 'mutable' qualifier, if any.
+    SourceLocation getMutableLoc() const {
+      return SourceLocation::getFromRawEncoding(MutableLoc);
+    }
+
     /// \brief Determine whether this function declaration contains a 
     /// ref-qualifier.
     bool hasRefQualifier() const { return getRefQualifierLoc().isValid(); }
+
+    /// \brief Determine whether this lambda-declarator contains a 'mutable'
+    /// qualifier.
+    bool hasMutableQualifier() const { return getMutableLoc().isValid(); }
 
     /// \brief Get the type of exception specification this function has.
     ExceptionSpecificationType getExceptionSpecType() const {
@@ -1200,7 +1250,7 @@ struct DeclaratorChunk {
 
   void destroy() {
     switch (Kind) {
-    default: assert(0 && "Unknown decl type!");
+    default: llvm_unreachable("Unknown decl type!");
     case DeclaratorChunk::Function:      return Fun.destroy();
     case DeclaratorChunk::Pointer:       return Ptr.destroy();
     case DeclaratorChunk::BlockPointer:  return Cls.destroy();
@@ -1276,6 +1326,9 @@ struct DeclaratorChunk {
                                      unsigned TypeQuals, 
                                      bool RefQualifierIsLvalueRef,
                                      SourceLocation RefQualifierLoc,
+                                     SourceLocation ConstQualifierLoc,
+                                     SourceLocation VolatileQualifierLoc,
+                                     SourceLocation MutableLoc,
                                      ExceptionSpecificationType ESpecType,
                                      SourceLocation ESpecLoc,
                                      ParsedType *Exceptions,
@@ -1326,6 +1379,15 @@ struct DeclaratorChunk {
 
 };
 
+/// \brief Described the kind of function definition (if any) provided for
+/// a function.
+enum FunctionDefinitionKind {
+  FDK_Declaration,
+  FDK_Definition,
+  FDK_Defaulted,
+  FDK_Deleted
+};
+  
 /// Declarator - Information about one declarator, including the parsed type
 /// information and the identifier.  When the declarator is fully formed, this
 /// is turned into the appropriate Decl object.
@@ -1341,7 +1403,8 @@ public:
   enum TheContext {
     FileContext,         // File scope declaration.
     PrototypeContext,    // Within a function prototype.
-    ObjCPrototypeContext,// Within a method prototype.
+    ObjCResultContext,   // An ObjC method result type.
+    ObjCParameterContext,// An ObjC method parameter type.
     KNRTypeListContext,  // K&R type definition list for formals.
     TypeNameContext,     // Abstract declarator for types.
     MemberContext,       // Struct/Union field.
@@ -1349,7 +1412,9 @@ public:
     ForContext,          // Declaration within first part of a for loop.
     ConditionContext,    // Condition declaration in a C++ if/switch/while/for.
     TemplateParamContext,// Within a template parameter list.
+    CXXNewContext,       // C++ new-expression.
     CXXCatchContext,     // C++ catch exception-declaration
+    ObjCCatchContext,    // Objective-C catch exception-declaration
     BlockLiteralContext,  // Block literal declarator.
     TemplateTypeArgContext, // Template type argument.
     AliasDeclContext,    // C++0x alias-declaration.
@@ -1370,13 +1435,22 @@ private:
   /// parsed.  This is pushed from the identifier out, which means that element
   /// #0 will be the most closely bound to the identifier, and
   /// DeclTypeInfo.back() will be the least closely bound.
-  llvm::SmallVector<DeclaratorChunk, 8> DeclTypeInfo;
+  SmallVector<DeclaratorChunk, 8> DeclTypeInfo;
 
   /// InvalidType - Set by Sema::GetTypeForDeclarator().
   bool InvalidType : 1;
 
   /// GroupingParens - Set by Parser::ParseParenDeclarator().
   bool GroupingParens : 1;
+
+  /// FunctionDefinition - Is this Declarator for a function or member 
+  /// definition and, if so, what kind?
+  ///
+  /// Actually a FunctionDefinitionKind.
+  unsigned FunctionDefinition : 2;
+
+  // Redeclaration - Is this Declarator is a redeclaration.
+  bool Redeclaration : 1;
 
   /// Attrs - Attributes.
   ParsedAttributes Attrs;
@@ -1403,8 +1477,10 @@ public:
   Declarator(const DeclSpec &ds, TheContext C)
     : DS(ds), Range(ds.getSourceRange()), Context(C),
       InvalidType(DS.getTypeSpecType() == DeclSpec::TST_error),
-      GroupingParens(false), Attrs(ds.getAttributePool().getFactory()),
-      AsmLabel(0), InlineParamsUsed(false), Extension(false) {
+      GroupingParens(false), FunctionDefinition(FDK_Declaration), 
+      Redeclaration(false),
+      Attrs(ds.getAttributePool().getFactory()), AsmLabel(0),
+      InlineParamsUsed(false), Extension(false) {
   }
 
   ~Declarator() {
@@ -1437,7 +1513,9 @@ public:
   TheContext getContext() const { return Context; }
 
   bool isPrototypeContext() const {
-    return (Context == PrototypeContext || Context == ObjCPrototypeContext);
+    return (Context == PrototypeContext ||
+            Context == ObjCParameterContext ||
+            Context == ObjCResultContext);
   }
 
   /// getSourceRange - Get the source range that spans this declarator.
@@ -1497,9 +1575,12 @@ public:
     case AliasDeclContext:
     case AliasTemplateContext:
     case PrototypeContext:
-    case ObjCPrototypeContext:
+    case ObjCParameterContext:
+    case ObjCResultContext:
     case TemplateParamContext:
+    case CXXNewContext:
     case CXXCatchContext:
+    case ObjCCatchContext:
     case BlockLiteralContext:
     case TemplateTypeArgContext:
       return true;
@@ -1521,12 +1602,15 @@ public:
     case PrototypeContext:
     case TemplateParamContext:
     case CXXCatchContext:
+    case ObjCCatchContext:
       return true;
 
     case TypeNameContext:
+    case CXXNewContext:
     case AliasDeclContext:
     case AliasTemplateContext:
-    case ObjCPrototypeContext:
+    case ObjCParameterContext:
+    case ObjCResultContext:
     case BlockLiteralContext:
     case TemplateTypeArgContext:
       return false;
@@ -1549,10 +1633,13 @@ public:
     case MemberContext:
     case ConditionContext:
     case PrototypeContext:
-    case ObjCPrototypeContext:
+    case ObjCParameterContext:
+    case ObjCResultContext:
     case TemplateParamContext:
     case CXXCatchContext:
+    case ObjCCatchContext:
     case TypeNameContext:
+    case CXXNewContext:
     case AliasDeclContext:
     case AliasTemplateContext:
     case BlockLiteralContext:
@@ -1697,6 +1784,14 @@ public:
     return const_cast<Declarator*>(this)->getFunctionTypeInfo();
   }
 
+  /// \brief Determine whether the declaration that will be produced from 
+  /// this declaration will be a function.
+  /// 
+  /// A declaration can declare a function even if the declarator itself
+  /// isn't a function declarator, if the type specifier refers to a function
+  /// type. This routine checks for both cases.
+  bool isDeclarationOfFunction() const;
+  
   /// takeAttributes - Takes attributes from the given parsed-attributes
   /// set and add them to this declarator.
   ///
@@ -1744,6 +1839,21 @@ public:
   bool hasEllipsis() const { return EllipsisLoc.isValid(); }
   SourceLocation getEllipsisLoc() const { return EllipsisLoc; }
   void setEllipsisLoc(SourceLocation EL) { EllipsisLoc = EL; }
+
+  void setFunctionDefinitionKind(FunctionDefinitionKind Val) { 
+    FunctionDefinition = Val; 
+  }
+  
+  bool isFunctionDefinition() const {
+    return getFunctionDefinitionKind() != FDK_Declaration;
+  }
+  
+  FunctionDefinitionKind getFunctionDefinitionKind() const { 
+    return (FunctionDefinitionKind)FunctionDefinition; 
+  }
+
+  void setRedeclaration(bool Val) { Redeclaration = Val; }
+  bool isRedeclaration() const { return Redeclaration; }
 };
 
 /// FieldDeclarator - This little struct is used to capture information about
@@ -1787,6 +1897,53 @@ private:
 
   SourceLocation VS_overrideLoc, VS_finalLoc;
   SourceLocation LastLocation;
+};
+
+/// LambdaCaptureDefault - The default, if any, capture method for a
+/// lambda expression.
+enum LambdaCaptureDefault {
+  LCD_None,
+  LCD_ByCopy,
+  LCD_ByRef
+};
+
+/// LambdaCaptureKind - The different capture forms in a lambda
+/// introducer: 'this' or a copied or referenced variable.
+enum LambdaCaptureKind {
+  LCK_This,
+  LCK_ByCopy,
+  LCK_ByRef
+};
+
+/// LambdaCapture - An individual capture in a lambda introducer.
+struct LambdaCapture {
+  LambdaCaptureKind Kind;
+  SourceLocation Loc;
+  IdentifierInfo* Id;
+
+  LambdaCapture(LambdaCaptureKind Kind,
+                     SourceLocation Loc,
+                     IdentifierInfo* Id = 0)
+    : Kind(Kind), Loc(Loc), Id(Id)
+  {}
+};
+
+/// LambdaIntroducer - Represents a complete lambda introducer.
+struct LambdaIntroducer {
+  SourceRange Range;
+  LambdaCaptureDefault Default;
+  llvm::SmallVector<LambdaCapture, 4> Captures;
+
+  LambdaIntroducer()
+    : Default(LCD_None) {}
+
+  /// addCapture - Append a capture in a lambda introducer.
+  void addCapture(LambdaCaptureKind Kind,
+                  SourceLocation Loc,
+                  IdentifierInfo* Id = 0) {
+    Captures.push_back(LambdaCapture(Kind, Loc, Id));
+  }
+
 };
 
 } // end namespace clang

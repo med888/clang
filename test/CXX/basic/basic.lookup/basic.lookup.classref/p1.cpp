@@ -36,11 +36,29 @@ void resolves_to_different() {
     Value v;
     // The fact that the next line is a warning rather than an error is an
     // extension.
-    v.set<double>(3.2);  // expected-warning{{lookup of 'set' in member access expression is ambiguous; using member of 'Value' [-Wambiguous-member-template]}}
+    v.set<double>(3.2);  // expected-warning{{lookup of 'set' in member access expression is ambiguous; using member of 'Value'}}
   }
   {
     int set;  // Non-template.
     Value v;
     v.set<double>(3.2);
   }
+}
+
+namespace rdar9915664 {
+  struct A {
+    template<typename T> void a();
+  };
+
+  struct B : A { };
+
+  struct C : A { };
+
+  struct D : B, C {
+    A &getA() { return static_cast<B&>(*this); }
+
+    void test_a() {
+      getA().a<int>();
+    }
+  };
 }

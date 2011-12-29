@@ -26,8 +26,8 @@
 // CHECK: @_ZGVZN6Test193fooIiEEvvE1a = linkonce_odr global i64
 // CHECK-HIDDEN: @_ZZN6Test193fooIiEEvvE1a = linkonce_odr hidden global
 // CHECK-HIDDEN: @_ZGVZN6Test193fooIiEEvvE1a = linkonce_odr hidden global i64
-// CHECK-HIDDEN: @_ZTTN6Test161AIcEE = external unnamed_addr constant
 // CHECK-HIDDEN: @_ZTVN6Test161AIcEE = external unnamed_addr constant
+// CHECK-HIDDEN: @_ZTTN6Test161AIcEE = external unnamed_addr constant
 // CHECK: @_ZTVN5Test63fooE = linkonce_odr hidden unnamed_addr constant 
 
 namespace Test1 {
@@ -156,7 +156,7 @@ namespace Test9 {
 namespace Test10 {
   struct A;
 
-  DEFAULT class B {
+  class DEFAULT B {
     void foo(A*);
   };
 
@@ -421,4 +421,36 @@ namespace test21 {
 
   // CHECK: define weak_odr void @_ZN6test211AILNS_2EnE0EE3fooEv(
   template void A<en>::foo();
+}
+
+// rdar://problem/9616154
+// Visibility on explicit specializations should take precedence.
+namespace test22 {
+  class A1 {};
+  class A2 {};
+
+  template <class T> struct B {};
+  template <> struct DEFAULT B<A1> {
+    static void foo();
+    static void bar() {}
+  };
+  template <> struct B<A2> {
+    static void foo();
+    static void bar() {}
+  };
+
+  void test() {
+    B<A1>::foo();
+    B<A1>::bar();
+    B<A2>::foo();
+    B<A2>::bar();
+  }
+  // CHECK: declare void @_ZN6test221BINS_2A1EE3fooEv()
+  // CHECK: define linkonce_odr void @_ZN6test221BINS_2A1EE3barEv()
+  // CHECK: declare void @_ZN6test221BINS_2A2EE3fooEv()
+  // CHECK: define linkonce_odr void @_ZN6test221BINS_2A2EE3barEv()
+  // CHECK-HIDDEN: declare void @_ZN6test221BINS_2A1EE3fooEv()
+  // CHECK-HIDDEN: define linkonce_odr void @_ZN6test221BINS_2A1EE3barEv()
+  // CHECK-HIDDEN: declare void @_ZN6test221BINS_2A2EE3fooEv()
+  // CHECK-HIDDEN: define linkonce_odr hidden void @_ZN6test221BINS_2A2EE3barEv()
 }

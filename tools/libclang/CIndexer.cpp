@@ -21,7 +21,7 @@
 #include "clang/Basic/Version.h"
 #include "clang/Sema/CodeCompleteConsumer.h"
 #include "llvm/ADT/StringExtras.h"
-#include "llvm/Config/config.h"
+#include "llvm/Config/llvm-config.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
@@ -74,7 +74,7 @@ std::string CIndexer::getClangResourcesPath() {
   // This silly cast below avoids a C++ warning.
   Dl_info info;
   if (dladdr((void *)(uintptr_t)clang_createTranslationUnit, &info) == 0)
-    assert(0 && "Call to dladdr() failed");
+    llvm_unreachable("Call to dladdr() failed");
   
   llvm::sys::Path LibClangPath(info.dli_fname);
   

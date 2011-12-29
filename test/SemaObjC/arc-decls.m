@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -fsyntax-only -fobjc-arc -fobjc-nonfragile-abi -verify %s
+// RUN: %clang_cc1 -fsyntax-only -fblocks -fobjc-arc -verify %s
 
 // rdar://8843524
 
@@ -21,8 +21,13 @@ union u {
 };
 @end
 
+// rdar://10260525
+struct r10260525 {
+  id (^block) (); // expected-error {{ARC forbids blocks in structs or unions}}
+};
+
 struct S { 
-    id __attribute__((objc_lifetime(none))) i;
+    id __attribute__((objc_ownership(none))) i;
     void * vp;
     int i1;
 };
@@ -31,17 +36,17 @@ struct S {
 
 @class NSError;
 
-__autoreleasing id X; // expected-error {{global variables cannot have __autoreleasing lifetime}}
-__autoreleasing NSError *E; // expected-error {{global variables cannot have __autoreleasing lifetime}}
+__autoreleasing id X; // expected-error {{global variables cannot have __autoreleasing ownership}}
+__autoreleasing NSError *E; // expected-error {{global variables cannot have __autoreleasing ownership}}
 
 
-extern id __autoreleasing X1; // expected-error {{global variables cannot have __autoreleasing lifetime}}
+extern id __autoreleasing X1; // expected-error {{global variables cannot have __autoreleasing ownership}}
 
 void func()
 {
     id X;
-    static id __autoreleasing X1; // expected-error {{global variables cannot have __autoreleasing lifetime}}
-    extern id __autoreleasing E; // expected-error {{global variables cannot have __autoreleasing lifetime}}
+    static id __autoreleasing X1; // expected-error {{global variables cannot have __autoreleasing ownership}}
+    extern id __autoreleasing E; // expected-error {{global variables cannot have __autoreleasing ownership}}
 
 }
 
@@ -62,3 +67,22 @@ void func()
 - new {return 0; };
 @end
 
+
+// rdar://10187884
+@interface Super
+- (void)bar:(id)b; // expected-note {{parameter declared here}}
+- (void)bar1:(id) __attribute((ns_consumed)) b;
+- (void)ok:(id) __attribute((ns_consumed)) b;
+- (id)ns_non; // expected-note {{method declared here}}
+- (id)not_ret:(id) b __attribute((ns_returns_not_retained)); // expected-note {{method declared here}}
+- (id)both__returns_not_retained:(id) b __attribute((ns_returns_not_retained));
+@end
+
+@interface Sub : Super
+- (void)bar:(id) __attribute((ns_consumed)) b; // expected-error {{overriding method has mismatched ns_consumed attribute on its parameter}}
+- (void)bar1:(id)b;
+- (void)ok:(id) __attribute((ns_consumed)) b;
+- (id)ns_non __attribute((ns_returns_not_retained)); // expected-error {{overriding method has mismatched ns_returns_not_retained attributes}}
+- (id)not_ret:(id) b __attribute((ns_returns_retained)); // expected-error {{overriding method has mismatched ns_returns_retained attributes}}
+- (id)both__returns_not_retained:(id) b __attribute((ns_returns_not_retained));
+@end

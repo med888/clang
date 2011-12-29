@@ -1,7 +1,5 @@
-// RUN: %clang_cc1 -triple x86_64-apple-darwin10 -analyze -analyzer-checker=core,osx.coreFoundation.CFRetainRelease,osx.cocoa.ClassRelease -analyzer-store=basic -fblocks -verify %s
-// RUN: %clang_cc1 -triple x86_64-apple-darwin10 -analyze -analyzer-checker=core,osx.coreFoundation.CFRetainRelease,osx.cocoa.ClassRelease -analyzer-store=region -fblocks -verify %s
-// RUN: %clang_cc1 -triple x86_64-apple-darwin10 -analyze -analyzer-checker=core,osx.coreFoundation.CFRetainRelease,osx.cocoa.ClassRelease -analyzer-store=basic -fblocks -verify -x objective-c++ %s
-// RUN: %clang_cc1 -triple x86_64-apple-darwin10 -analyze -analyzer-checker=core,osx.coreFoundation.CFRetainRelease,osx.cocoa.ClassRelease -analyzer-store=region -fblocks -verify -x objective-c++ %s
+// RUN: %clang_cc1 -triple x86_64-apple-darwin10 -analyze -analyzer-checker=core,osx.coreFoundation.CFRetainRelease,osx.cocoa.ClassRelease,osx.cocoa.RetainCount -analyzer-store=region -fblocks -verify %s
+// RUN: %clang_cc1 -triple x86_64-apple-darwin10 -analyze -analyzer-checker=core,osx.coreFoundation.CFRetainRelease,osx.cocoa.ClassRelease,osx.cocoa.RetainCount -analyzer-store=region -fblocks -verify -x objective-c++ %s
 
 #if __has_feature(attribute_ns_returns_retained)
 #define NS_RETURNS_RETAINED __attribute__((ns_returns_retained))
@@ -148,7 +146,9 @@ NSFastEnumerationState;
 typedef double NSTimeInterval;
 @interface NSDate : NSObject <NSCopying, NSCoding>  - (NSTimeInterval)timeIntervalSinceReferenceDate;
 @end            typedef unsigned short unichar;
-@interface NSString : NSObject <NSCopying, NSMutableCopying, NSCoding>    - (NSUInteger)length;
+@interface NSString : NSObject <NSCopying, NSMutableCopying, NSCoding>
+- (NSUInteger)length;
+- (NSString *)stringByAppendingString:(NSString *)aString;
 - ( const char *)UTF8String;
 - (id)initWithUTF8String:(const char *)nullTerminatedCString;
 + (id)stringWithUTF8String:(const char *)nullTerminatedCString;
@@ -269,6 +269,12 @@ extern void CGContextDrawLinearGradient(CGContextRef context,
     CGGradientRef gradient, CGPoint startPoint, CGPoint endPoint,
     CGGradientDrawingOptions options);
 extern CGColorSpaceRef CGColorSpaceCreateDeviceRGB(void);
+
+@interface NSMutableArray : NSObject
+- (void)addObject:(id)object;
++ (id)array;
+@end
+
 
 //===----------------------------------------------------------------------===//
 // Test cases.
@@ -518,7 +524,7 @@ void f17(int x, CFTypeRef p) {
 @implementation TestReturnNotOwnedWhenExpectedOwned
 - (NSString*)newString {
   NSString *s = [NSString stringWithUTF8String:"hello"];
-  return s; // expected-warning{{Object with +0 retain counts returned to caller where a +1 (owning) retain count is expected}}
+  return s; // expected-warning{{Object with a +0 retain count returned to caller where a +1 (owning) retain count is expected}}
 }
 @end
 
@@ -654,6 +660,12 @@ void rdar6704930(unsigned char *s, unsigned int length) {
     [window release];
     [super dealloc];
 }
+
+- (void)radar10102244 {
+ NSMutableDictionary *dict = [[NSMutableDictionary dictionaryWithCapacity:4] retain]; // expected-warning{{leak}} 
+ if (window) 
+   NSLog(@"%@", window);    
+}
 @end
 
 //===----------------------------------------------------------------------===//
@@ -736,7 +748,7 @@ typedef CFTypeRef OtherRef;
 - (id)initReturningNewClassBad2 {
   [self release];
   self = [[RDar6320065Subclass alloc] init];
-  return [self autorelease]; // expected-warning{{Object with +0 retain counts returned to caller where a +1 (owning) retain count is expected}}
+  return [self autorelease]; // expected-warning{{Object with a +0 retain count returned to caller where a +1 (owning) retain count is expected}}
 }
 
 @end
@@ -1303,7 +1315,7 @@ CFDateRef returnsRetainedCFDate()  {
 }
 
 - (CFDateRef) newCFRetainedAsCFNoAttr {
-  return (CFDateRef)[(id)[self returnsCFRetainedAsCF] autorelease]; // expected-warning{{Object with +0 retain counts returned to caller where a +1 (owning) retain count is expected}}
+  return (CFDateRef)[(id)[self returnsCFRetainedAsCF] autorelease]; // expected-warning{{Object with a +0 retain count returned to caller where a +1 (owning) retain count is expected}}
 }
 
 - (NSDate*) alsoReturnsRetained {
@@ -1446,7 +1458,7 @@ static void rdar_8724287(CFErrorRef error)
     while (error_to_dump != ((void*)0)) {
         CFDictionaryRef info;
 
-        info = CFErrorCopyUserInfo(error_to_dump); // expected-warning{{Potential leak of an object allocated on line 1449 and stored into 'info'}}
+        info = CFErrorCopyUserInfo(error_to_dump); // expected-warning{{Potential leak of an object allocated on line}}
 
         if (info != ((void*)0)) {
         }
@@ -1462,3 +1474,133 @@ extern void rdar_9234108_helper(void *key, void * CF_CONSUMED value);
 void rdar_9234108() {
   rdar_9234108_helper(0, CFStringCreate());
 }
+
+// <rdar://problem/9726279> - Make sure that objc_method_family works
+// to override naming conventions.
+struct TwoDoubles {
+  double one;
+  double two;
+};
+typedef struct TwoDoubles TwoDoubles;
+
+@interface NSValue (Mine)
+- (id)_prefix_initWithTwoDoubles:(TwoDoubles)twoDoubles __attribute__((objc_method_family(init)));
+@end
+
+@implementation NSValue (Mine)
+- (id)_prefix_initWithTwoDoubles:(TwoDoubles)twoDoubles
+{
+  return [self init];
+}
+@end
+
+void rdar9726279() {
+  TwoDoubles twoDoubles = { 0.0, 0.0 };
+  NSValue *value = [[NSValue alloc] _prefix_initWithTwoDoubles:twoDoubles];
+  [value release];
+}
+
+// <rdar://problem/9732321>
+// Test camelcase support for CF conventions.  While Core Foundation APIs
+// don't use camel casing, other code is allowed to use it.
+CFArrayRef camelcase_create_1() {
+  return CFArrayCreateMutable(0, 10, &kCFTypeArrayCallBacks); // no-warning
+}
+
+CFArrayRef camelcase_createno() {
+  return CFArrayCreateMutable(0, 10, &kCFTypeArrayCallBacks); // expected-warning {{leak}}
+}
+
+CFArrayRef camelcase_copy() {
+  return CFArrayCreateMutable(0, 10, &kCFTypeArrayCallBacks); // no-warning
+}
+
+CFArrayRef camelcase_copying() {
+  return CFArrayCreateMutable(0, 10, &kCFTypeArrayCallBacks); // expected-warning {{leak}}
+}
+
+CFArrayRef copyCamelCase() {
+  return CFArrayCreateMutable(0, 10, &kCFTypeArrayCallBacks); // no-warning
+}
+
+CFArrayRef __copyCamelCase() {
+  return CFArrayCreateMutable(0, 10, &kCFTypeArrayCallBacks); // no-warning
+}
+
+CFArrayRef __createCamelCase() {
+  return CFArrayCreateMutable(0, 10, &kCFTypeArrayCallBacks); // no-warning
+}
+
+CFArrayRef camel_create() {
+  return CFArrayCreateMutable(0, 10, &kCFTypeArrayCallBacks); // no-warning
+}
+
+
+CFArrayRef camel_creat() {
+  return CFArrayCreateMutable(0, 10, &kCFTypeArrayCallBacks); // expected-warning {{leak}}
+}
+
+CFArrayRef camel_copy() {
+  return CFArrayCreateMutable(0, 10, &kCFTypeArrayCallBacks); // no-warning
+}
+
+CFArrayRef camel_copyMachine() {
+  return CFArrayCreateMutable(0, 10, &kCFTypeArrayCallBacks); // no-warning
+}
+
+CFArrayRef camel_copymachine() {
+  return CFArrayCreateMutable(0, 10, &kCFTypeArrayCallBacks); // expected-warning {{leak}}
+}
+
+// rdar://problem/8024350
+@protocol F18P
+- (id) clone;
+@end
+@interface F18 : NSObject<F18P> @end
+@interface F18(Cat)
+- (id) clone NS_RETURNS_RETAINED;
+@end
+
+@implementation F18
+- (id) clone {
+  return [F18 alloc];
+}
+@end
+
+// Radar 6582778.
+void rdar6582778(void) {
+  CFAbsoluteTime t = CFAbsoluteTimeGetCurrent();
+  CFTypeRef vals[] = { CFDateCreate(0, t) }; // expected-warning {{leak}}
+}
+
+CFTypeRef global;
+
+void rdar6582778_2(void) {
+  CFAbsoluteTime t = CFAbsoluteTimeGetCurrent();
+  global = CFDateCreate(0, t); // no-warning
+}
+
+// <rdar://problem/10232019> - Test that objects passed to containers
+// are marked "escaped".
+
+void rdar10232019() {
+  NSMutableArray *array = [NSMutableArray array];
+
+  NSString *string = [[NSString alloc] initWithUTF8String:"foo"];
+  [array addObject:string];
+  [string release];
+
+  NSString *otherString = [string stringByAppendingString:@"bar"]; // no-warning
+  NSLog(@"%@", otherString);
+}
+
+void rdar10232019_positive() {
+  NSMutableArray *array = [NSMutableArray array];
+
+  NSString *string = [[NSString alloc] initWithUTF8String:"foo"];
+  [string release];
+
+  NSString *otherString = [string stringByAppendingString:@"bar"]; // expected-warning {{Reference-counted object is used after it is release}}
+  NSLog(@"%@", otherString);
+}
+

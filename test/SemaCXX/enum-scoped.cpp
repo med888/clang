@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -fsyntax-only -pedantic -std=c++0x -verify -triple x86_64-apple-darwin %s
+// RUN: %clang_cc1 -fsyntax-only -pedantic -std=c++11 -verify -triple x86_64-apple-darwin %s
 
 enum class E1 {
   Val1 = 1L
@@ -118,4 +118,32 @@ namespace rdar9366066 {
     x % X::value; // expected-error{{invalid operands to binary expression ('rdar9366066::X' and 'rdar9366066::X')}}
     x % 8; // expected-error{{invalid operands to binary expression ('rdar9366066::X' and 'int')}}
   }
+}
+
+// Part 1 of PR10264
+namespace test5 {
+  namespace ns {
+    typedef unsigned Atype;
+    enum A : Atype;
+  }
+  enum ns::A : ns::Atype {
+    x, y, z
+  };
+}
+
+// Part 2 of PR10264
+namespace test6 {
+  enum A : unsigned;
+  struct A::a; // expected-error {{incomplete type 'test6::A' named in nested name specifier}}
+  enum A::b; // expected-error {{incomplete type 'test6::A' named in nested name specifier}}
+  int A::c; // expected-error {{incomplete type 'test6::A' named in nested name specifier}}
+  void A::d(); // expected-error {{incomplete type 'test6::A' named in nested name specifier}}
+  void test() {
+    (void) A::e; // expected-error {{incomplete type 'test6::A' named in nested name specifier}}
+  }
+}
+
+namespace PR11484 {
+  const int val = 104;
+  enum class test1 { owner_dead = val, };
 }

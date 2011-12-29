@@ -1,7 +1,7 @@
 // RUN: cp %s %t
-// RUN: %clang_cc1 -pedantic -fixit -x c %t || true
+// RUN: not %clang_cc1 -pedantic -Wunused-label -fixit -x c %t
 // RUN: grep -v CHECK %t > %t2
-// RUN: %clang_cc1 -pedantic -Werror -x c %t
+// RUN: %clang_cc1 -pedantic -Wunused-label -Werror -x c %t
 // RUN: FileCheck -input-file=%t2 %t
 
 /* This is a test of the various code modification hints that are
@@ -33,9 +33,14 @@ void f1(x, y)
 
 int i0 = { 17 };
 
+#define ONE 1
+#define TWO 2
+
 int test_cond(int y, int fooBar) {
 // CHECK: int x = y ? 1 : 4+fooBar;
   int x = y ? 1 4+foobar;
+// CHECK: x = y ? ONE : TWO;
+  x = y ? ONE TWO;
   return x;
 }
 
@@ -54,3 +59,21 @@ struct test_struct {
   // CHECK: struct test_struct *struct_ptr;
   test_struct *struct_ptr; // expected-error {{must use 'struct' tag to refer to type 'test_struct'}}
 };
+
+void removeUnusedLabels(char c) {
+  L0 /*removed comment*/:        c++;
+  removeUnusedLabels(c);
+  L1:
+  c++;
+  /*preserved comment*/ L2  :        c++;
+  LL
+  : c++;
+  c = c + 3; L4: return;
+}
+
+int oopsAComma = 0,
+void oopsMoreCommas() {
+  static int a[] = { 0, 1, 2 },
+  static int b[] = { 3, 4, 5 },
+  &a == &b ? oopsMoreCommas() : removeUnusedLabels(a[0]);
+}

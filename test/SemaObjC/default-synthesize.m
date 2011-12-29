@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -fsyntax-only -fobjc-nonfragile-abi -fobjc-default-synthesize-properties -verify %s
+// RUN: %clang_cc1 -fsyntax-only -fobjc-default-synthesize-properties -verify %s
 
 @interface NSString @end
 
@@ -97,10 +97,10 @@
 // rdar://7920807
 @interface C @end
 @interface C (Category)
-@property int p; // expected-warning {{property 'p' requires method 'p' to be defined }} \
-                 // expected-warning {{property 'p' requires method 'setP:' to be defined}}
+@property int p; // expected-note 2 {{property declared here}}
 @end
-@implementation C (Category) // expected-note 2 {{implementation is here}}
+@implementation C (Category) // expected-warning {{property 'p' requires method 'p' to be defined}} \
+                             // expected-warning {{property 'p' requires method 'setP:' to be defined}}
 @end
 
 // Don't complain if a property is already @synthesized by usr.
@@ -115,3 +115,16 @@
 @synthesize PROP=IVAR;
 @end
 
+// rdar://10567333
+@protocol MyProtocol 
+@property (nonatomic, strong) NSString *requiredString; // expected-note {{property declared here}}
+
+@optional
+@property (nonatomic, strong) NSString *optionalString;
+@end
+ 
+@interface MyClass <MyProtocol> 
+@end
+ 
+@implementation MyClass // expected-warning {{auto property synthesis will not synthesize property declared in a protocol}}
+@end

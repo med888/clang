@@ -93,7 +93,6 @@ static Cl::Kinds ClassifyInternal(ASTContext &Ctx, const Expr *E) {
   const LangOptions &Lang = Ctx.getLangOptions();
 
   switch (E->getStmtClass()) {
-    // First come the expressions that are always lvalues, unconditionally.
   case Stmt::NoStmtClass:
 #define ABSTRACT_STMT(Kind)
 #define STMT(Kind, Base) case Expr::Kind##Class:
@@ -101,6 +100,8 @@ static Cl::Kinds ClassifyInternal(ASTContext &Ctx, const Expr *E) {
 #include "clang/AST/StmtNodes.inc"
     llvm_unreachable("cannot classify a statement");
     break;
+
+    // First come the expressions that are always lvalues, unconditionally.
   case Expr::ObjCIsaExprClass:
     // C++ [expr.prim.general]p1: A string literal is an lvalue.
   case Expr::StringLiteralClass:
@@ -117,12 +118,12 @@ static Cl::Kinds ClassifyInternal(ASTContext &Ctx, const Expr *E) {
   case Expr::UnresolvedLookupExprClass:
   case Expr::UnresolvedMemberExprClass:
   case Expr::CXXDependentScopeMemberExprClass:
-  case Expr::CXXUnresolvedConstructExprClass:
   case Expr::DependentScopeDeclRefExprClass:
     // ObjC instance variables are lvalues
     // FIXME: ObjC++0x might have different rules
   case Expr::ObjCIvarRefExprClass:
     return Cl::CL_LValue;
+
     // C99 6.5.2.5p5 says that compound literals are lvalues.
     // In C++, they're class temporaries.
   case Expr::CompoundLiteralExprClass:
@@ -158,14 +159,17 @@ static Cl::Kinds ClassifyInternal(ASTContext &Ctx, const Expr *E) {
   case Expr::ObjCProtocolExprClass:
   case Expr::ObjCStringLiteralClass:
   case Expr::ParenListExprClass:
-  case Expr::InitListExprClass:
   case Expr::SizeOfPackExprClass:
   case Expr::SubstNonTypeTemplateParmPackExprClass:
   case Expr::AsTypeExprClass:
   case Expr::ObjCIndirectCopyRestoreExprClass:
+  case Expr::AtomicExprClass:
     return Cl::CL_PRValue;
 
     // Next come the complicated cases.
+  case Expr::SubstNonTypeTemplateParmExprClass:
+    return ClassifyInternal(Ctx,
+                 cast<SubstNonTypeTemplateParmExpr>(E)->getReplacement());
 
     // C++ [expr.sub]p1: The result is an lvalue of type "T".
     // However, subscripting vector types is more like member access.
@@ -226,21 +230,24 @@ static Cl::Kinds ClassifyInternal(ASTContext &Ctx, const Expr *E) {
     }
 
   case Expr::OpaqueValueExprClass:
+    return ClassifyExprValueKind(Lang, E, E->getValueKind());
+
+    // Pseudo-object expressions can produce l-values with reference magic.
+  case Expr::PseudoObjectExprClass:
     return ClassifyExprValueKind(Lang, E,
-                                 cast<OpaqueValueExpr>(E)->getValueKind());
+                                 cast<PseudoObjectExpr>(E)->getValueKind());
 
     // Implicit casts are lvalues if they're lvalue casts. Other than that, we
     // only specifically record class temporaries.
   case Expr::ImplicitCastExprClass:
-    return ClassifyExprValueKind(Lang, E,
-                                 cast<ImplicitCastExpr>(E)->getValueKind());
+    return ClassifyExprValueKind(Lang, E, E->getValueKind());
 
     // C++ [expr.prim.general]p4: The presence of parentheses does not affect
     //   whether the expression is an lvalue.
   case Expr::ParenExprClass:
     return ClassifyInternal(Ctx, cast<ParenExpr>(E)->getSubExpr());
 
-    // C1X 6.5.1.1p4: [A generic selection] is an lvalue, a function designator,
+    // C11 6.5.1.1p4: [A generic selection] is an lvalue, a function designator,
     // or a void expression if its result expression is, respectively, an
     // lvalue, a function designator, or a void expression.
   case Expr::GenericSelectionExprClass:
@@ -295,6 +302,10 @@ static Cl::Kinds ClassifyInternal(ASTContext &Ctx, const Expr *E) {
     if (!Lang.CPlusPlus) return Cl::CL_PRValue;
     return ClassifyUnnamed(Ctx, cast<ExplicitCastExpr>(E)->getTypeAsWritten());
 
+  case Expr::CXXUnresolvedConstructExprClass:
+    return ClassifyUnnamed(Ctx, 
+                      cast<CXXUnresolvedConstructExpr>(E)->getTypeAsWritten());
+      
   case Expr::BinaryConditionalOperatorClass: {
     if (!Lang.CPlusPlus) return Cl::CL_PRValue;
     const BinaryConditionalOperator *co = cast<BinaryConditionalOperator>(E);
@@ -325,24 +336,40 @@ static Cl::Kinds ClassifyInternal(ASTContext &Ctx, const Expr *E) {
 
   case Expr::VAArgExprClass:
     return ClassifyUnnamed(Ctx, E->getType());
-      
+
   case Expr::DesignatedInitExprClass:
     return ClassifyInternal(Ctx, cast<DesignatedInitExpr>(E)->getInit());
-      
+
   case Expr::StmtExprClass: {
     const CompoundStmt *S = cast<StmtExpr>(E)->getSubStmt();
     if (const Expr *LastExpr = dyn_cast_or_null<Expr>(S->body_back()))
       return ClassifyUnnamed(Ctx, LastExpr->getType());
     return Cl::CL_PRValue;
   }
-      
+
   case Expr::CXXUuidofExprClass:
     return Cl::CL_LValue;
-      
+
   case Expr::PackExpansionExprClass:
     return ClassifyInternal(Ctx, cast<PackExpansionExpr>(E)->getPattern());
+
+  case Expr::MaterializeTemporaryExprClass:
+    return cast<MaterializeTemporaryExpr>(E)->isBoundToLvalueReference()
+              ? Cl::CL_LValue 
+              : Cl::CL_XValue;
+
+  case Expr::InitListExprClass:
+    // An init list can be an lvalue if it is bound to a reference and
+    // contains only one element. In that case, we look at that element
+    // for an exact classification. Init list creation takes care of the
+    // value kind for us, so we only need to fine-tune.
+    if (E->isRValue())
+      return ClassifyExprValueKind(Lang, E, E->getValueKind());
+    assert(cast<InitListExpr>(E)->getNumInits() == 1 &&
+           "Only 1-element init lists can be glvalues.");
+    return ClassifyInternal(Ctx, cast<InitListExpr>(E)->getInit(0));
   }
-  
+
   llvm_unreachable("unhandled expression kind in classification");
   return Cl::CL_LValue;
 }
@@ -382,7 +409,7 @@ static Cl::Kinds ClassifyUnnamed(ASTContext &Ctx, QualType T) {
 
   // C++ [expr.call]p10: A function call is an lvalue if the result type is an
   //   lvalue reference type or an rvalue reference to function type, an xvalue
-  //   if the result type is an rvalue refernence to object type, and a prvalue
+  //   if the result type is an rvalue reference to object type, and a prvalue
   //   otherwise.
   if (T->isLValueReferenceType())
     return Cl::CL_LValue;
@@ -468,14 +495,16 @@ static Cl::Kinds ClassifyBinaryOp(ASTContext &Ctx, const BinaryOperator *E) {
   //   is a pointer to a data member is of the same value category as its first
   //   operand.
   if (E->getOpcode() == BO_PtrMemD)
-    return (E->getType()->isFunctionType() || E->getType() == Ctx.BoundMemberTy)
+    return (E->getType()->isFunctionType() ||
+            E->hasPlaceholderType(BuiltinType::BoundMember))
              ? Cl::CL_MemberFunction 
              : ClassifyInternal(Ctx, E->getLHS());
 
   // C++ [expr.mptr.oper]p6: The result of an ->* expression is an lvalue if its
   //   second operand is a pointer to data member and a prvalue otherwise.
   if (E->getOpcode() == BO_PtrMemI)
-    return (E->getType()->isFunctionType() || E->getType() == Ctx.BoundMemberTy)
+    return (E->getType()->isFunctionType() ||
+            E->hasPlaceholderType(BuiltinType::BoundMember))
              ? Cl::CL_MemberFunction 
              : Cl::CL_LValue;
 

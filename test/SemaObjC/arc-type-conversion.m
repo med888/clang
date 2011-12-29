@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -fsyntax-only -fobjc-arc -fobjc-nonfragile-abi -verify %s
+// RUN: %clang_cc1 -fsyntax-only -fobjc-arc -fobjc-runtime-has-weak -verify -fblocks %s
 
 void * cvt(id arg)
 {
@@ -6,18 +6,21 @@ void * cvt(id arg)
   (void)(int*)arg; // expected-error {{cast of an Objective-C pointer to 'int *' is disallowed with ARC}}
   (void)(id)arg;
   (void)(__autoreleasing id*)arg; // expected-error {{cast of an Objective-C pointer to '__autoreleasing id *' is disallowed with ARC}}
-  (void)(id*)arg; // expected-error {{pointer to non-const type 'id' with no explicit lifetime}} expected-error {{cast of an Objective-C pointer to '__autoreleasing id *' is disallowed with ARC}}
+  (void)(id*)arg; // expected-error {{cast of an Objective-C pointer to '__strong id *' is disallowed with ARC}}
 
   (void)(__autoreleasing id**)voidp_val;
   (void)(void*)voidp_val;
   (void)(void**)arg; // expected-error {{cast of an Objective-C pointer to 'void **' is disallowed with ARC}}
   cvt((void*)arg); // expected-error {{cast of Objective-C pointer type 'id' to C pointer type 'void *' requires a bridged cast}} \
-                   // expected-error {{implicit conversion of a non-Objective-C pointer type 'void *' to 'id' is disallowed with ARC}} \
-                   // expected-note{{use __bridge to convert directly (no change in ownership)}} \
-                   // expected-note{{use __bridge_retained to make an ARC object available as a +1 'void *'}}
+                   // expected-error {{implicit conversion of C pointer type 'void *' to Objective-C pointer type 'id' requires a bridged cast}} \
+                   // expected-note 2 {{use __bridge to convert directly (no change in ownership)}} \
+                   // expected-note {{use __bridge_retained to make an ARC object available as a +1 'void *'}} \
+                   // expected-note {{use __bridge_transfer to transfer ownership of a +1 'void *' into ARC}}
   cvt(0);
   (void)(__strong id**)(0);
-  return arg; // expected-error {{implicit conversion of an Objective-C pointer to 'void *' is disallowed with ARC}}
+  return arg; // expected-error {{implicit conversion of Objective-C pointer type 'id' to C pointer type 'void *' requires a bridged cast}} \
+                   // expected-note {{use __bridge to convert directly (no change in ownership)}} \
+                   // expected-note {{use __bridge_retained to make an ARC object available as a +1 'void *'}}
 }
 
 void to_void(__strong id *sip, __weak id *wip,
@@ -52,4 +55,34 @@ void from_void(void *vp) {
   wip = vp; // expected-error{{implicit conversion of a non-Objective-C pointer type 'void *' to '__weak id *' is disallowed with ARC}}
   aip = vp; // expected-error{{implicit conversion of a non-Objective-C pointer type 'void *' to '__autoreleasing id *' is disallowed with ARC}}
   uip = vp; // expected-error{{implicit conversion of a non-Objective-C pointer type 'void *' to '__unsafe_unretained id *' is disallowed with ARC}}
+}
+
+typedef void (^Block)();
+typedef void (^Block_strong)() __strong;
+typedef void (^Block_autoreleasing)() __autoreleasing;
+
+@class NSString;
+
+void ownership_transfer_in_cast(void *vp, Block *pblk) {
+  __strong NSString **sip = (NSString**)(__strong id *)vp;
+  __weak NSString **wip = (NSString**)(__weak id *)vp;
+  __autoreleasing id *aip = (id*)(__autoreleasing id *)vp;
+  __unsafe_unretained id *uip = (id*)(__unsafe_unretained id *)vp;
+
+  __strong id **sipp = (id**)(__strong id **)vp;
+  __weak id **wipp = (id**)(__weak id **)vp;
+  __autoreleasing id **aipp = (id**)(__autoreleasing id **)vp;
+  __unsafe_unretained id **uipp = (id**)(__unsafe_unretained id **)vp;
+
+  Block_strong blk_strong1;
+  Block_strong blk_strong2 = (Block)blk_strong1;
+  Block_autoreleasing *blk_auto = (Block*)pblk;
+
+  id lv;
+  (void)(id)&lv; // expected-error {{cast of an indirect pointer to an Objective-C pointer to 'id'}}
+  (void)(id*)lv; // expected-error {{cast of an Objective-C pointer to '__strong id *'}}
+  (void)(NSString*)&lv; // expected-error {{cast of an indirect pointer to an Objective-C pointer to 'NSString *'}}
+  (void)(NSString**)lv; // expected-error {{cast of an Objective-C pointer to 'NSString *__strong *'}}
+  (void)(Block)&lv; // expected-error {{cast of an indirect pointer to an Objective-C pointer to 'Block'}}
+  (void)(Block*)lv; // expected-error {{cast of an Objective-C pointer to '__strong Block *'}}
 }

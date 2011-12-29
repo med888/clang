@@ -1,6 +1,33 @@
-// RUN: %clang_cc1 -arcmt-check -verify -triple x86_64-apple-darwin10 -fobjc-nonfragile-abi %s
+// RUN: %clang_cc1 -arcmt-check -verify -triple x86_64-apple-darwin10 %s
 
-#include "Common.h"
+#if __has_feature(objc_arc)
+#define NS_AUTOMATED_REFCOUNT_UNAVAILABLE __attribute__((unavailable("not available in automatic reference counting mode")))
+#else
+#define NS_AUTOMATED_REFCOUNT_UNAVAILABLE
+#endif
+
+typedef int BOOL;
+typedef unsigned NSUInteger;
+
+@protocol NSObject
+- (id)retain NS_AUTOMATED_REFCOUNT_UNAVAILABLE; // expected-note {{unavailable here}}
+- (NSUInteger)retainCount NS_AUTOMATED_REFCOUNT_UNAVAILABLE;
+- (oneway void)release NS_AUTOMATED_REFCOUNT_UNAVAILABLE; // expected-note 4 {{unavailable here}}
+- (id)autorelease NS_AUTOMATED_REFCOUNT_UNAVAILABLE;
+@end
+
+@interface NSObject <NSObject> {}
+- (id)init;
+
++ (id)new;
++ (id)alloc;
+- (void)dealloc;
+
+- (void)finalize;
+
+- (id)copy;
+- (id)mutableCopy;
+@end
 
 typedef const struct __CFString * CFStringRef;
 extern const CFStringRef kUTTypePlainText;
@@ -20,6 +47,7 @@ struct UnsafeS {
 - (oneway void)release;
 - (void)dealloc;
 -(void)test;
+-(id)delegate;
 @end
 
 @implementation A
@@ -34,21 +62,39 @@ struct UnsafeS {
 - (id)retainCount { return self; } // expected-error {{ARC forbids implementation}}
 - (id)autorelease { return self; } // expected-error {{ARC forbids implementation}}
 - (oneway void)release { } // expected-error {{ARC forbids implementation}}
+
+-(id)delegate { return self; }
 @end
 
+id global_foo;
+
 void test1(A *a, BOOL b, struct UnsafeS *unsafeS) {
-  [unsafeS->unsafeObj retain]; // expected-error {{It is not safe to remove 'retain' message on an __unsafe_unretained type}} \
+  [[a delegate] release]; // expected-error {{it is not safe to remove 'retain' message on the result of a 'delegate' message; the object that was passed to 'setDelegate:' may not be properly retained}} \
+                          // expected-error {{ARC forbids explicit message send}} \
+                          // expected-error {{unavailable}}
+  [a.delegate release]; // expected-error {{it is not safe to remove 'retain' message on the result of a 'delegate' message; the object that was passed to 'setDelegate:' may not be properly retained}} \
+                        // expected-error {{ARC forbids explicit message send}} \
+                        // expected-error {{unavailable}}
+  [unsafeS->unsafeObj retain]; // expected-error {{it is not safe to remove 'retain' message on an __unsafe_unretained type}} \
                                // expected-error {{ARC forbids explicit message send}}
+  id foo = [unsafeS->unsafeObj retain]; // no warning.
+  [global_foo retain]; // expected-error {{it is not safe to remove 'retain' message on a global variable}} \
+                       // expected-error {{ARC forbids explicit message send}} \
+                       // expected-error {{unavailable}}
+  [global_foo release]; // expected-error {{it is not safe to remove 'release' message on a global variable}} \
+                        // expected-error {{ARC forbids explicit message send}} \
+                        // expected-error {{unavailable}}
   [a dealloc];
   [a retain];
   [a retainCount]; // expected-error {{ARC forbids explicit message send of 'retainCount'}}
   [a release];
-  [a autorelease];
+  [a autorelease]; // expected-error {{it is not safe to remove an unused 'autorelease' message; its receiver may be destroyed immediately}} \
+                   // expected-error {{ARC forbids explicit message send}}
 
   CFStringRef cfstr;
   NSString *str = (NSString *)cfstr; // expected-error {{cast of C pointer type 'CFStringRef' (aka 'const struct __CFString *') to Objective-C pointer type 'NSString *' requires a bridged cast}} \
-  // expected-note{{use __bridge to convert directly (no change in ownership)}} \
-  // expected-note{{use __bridge_transfer to transfer ownership of a +1 'CFStringRef' (aka 'const struct __CFString *') into ARC}}
+  // expected-note {{use __bridge to convert directly (no change in ownership)}} \
+  // expected-note {{use __bridge_transfer to transfer ownership of a +1 'CFStringRef' (aka 'const struct __CFString *') into ARC}} \
   str = (NSString *)kUTTypePlainText;
   str = b ? kUTTypeRTF : kUTTypePlainText;
   str = (NSString *)(b ? kUTTypeRTF : kUTTypePlainText);
@@ -59,7 +105,7 @@ void test1(A *a, BOOL b, struct UnsafeS *unsafeS) {
   s = @selector(autorelease); // expected-error {{ARC forbids use of 'autorelease' in a @selector}}
   s = @selector(dealloc); // expected-error {{ARC forbids use of 'dealloc' in a @selector}}
 
-  static id __autoreleasing X1; // expected-error {{global variables cannot have __autoreleasing lifetime}}
+  static id __autoreleasing X1; // expected-error {{global variables cannot have __autoreleasing ownership}}
 }
 
 struct S {
@@ -100,16 +146,16 @@ void * cvt(id arg)
   (void)(int*)arg; // expected-error {{disallowed}}
   (void)(id)arg;
   (void)(__autoreleasing id*)arg; // expected-error {{disallowed}}
-  (void)(id*)arg; // expected-error {{pointer to non-const type 'id' with no explicit lifetime}} expected-error {{disallowed}}
+  (void)(id*)arg; // expected-error {{disallowed}}
 
   (void)(__autoreleasing id**)voidp_val;
   (void)(void*)voidp_val;
   (void)(void**)arg; // expected-error {{disallowed}}
-  cvt((void*)arg); // expected-error {{requires a bridged cast}} expected-error {{disallowed}} \
-                   // expected-note {{use __bridge}} expected-note {{use __bridge_retained}} 
+  cvt((void*)arg); // expected-error 2 {{requires a bridged cast}} \
+                   // expected-note 2 {{use __bridge to}} expected-note {{use __bridge_transfer}} expected-note {{use __bridge_retained}}
   cvt(0);
   (void)(__strong id**)(0);
-  return arg; // expected-error {{disallowed}}
+  return arg; // expected-error {{requires a bridged cast}} expected-note {{use __bridge}} expected-note {{use __bridge_retained}}
 }
 
 
@@ -251,5 +297,31 @@ void rdar9491791(int p) {
 
 // rdar://9504750
 void rdar9504750(id p) {
-  RELEASE_MACRO(p); // expected-error {{ARC forbids explicit message send of 'release'}}
+  RELEASE_MACRO(p); // expected-error {{ARC forbids explicit message send of 'release'}} \
+                    // expected-error {{unavailable}}
 }
+
+// rdar://8939557
+@interface TestReadonlyProperty : NSObject
+@property(assign,readonly) NSObject *value;
+@end
+
+@implementation TestReadonlyProperty
+@synthesize value;
+- (void)viewDidLoad {
+  value = [NSObject new]; // expected-error {{assigning retained object}}
+}
+@end
+
+// rdar://9601437
+@interface I9601437 {
+  __unsafe_unretained id x;
+}
+-(void)Meth;
+@end
+
+@implementation I9601437
+-(void)Meth {
+  self->x = [NSObject new]; // expected-error {{assigning retained object}}
+}
+@end

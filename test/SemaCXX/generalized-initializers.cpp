@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -std=c++0x -fsyntax-only -verify %s
+// RUN: %clang_cc1 -std=c++11 -fsyntax-only -verify %s
 // XFAIL: *
 
 template <typename T, typename U>
@@ -40,32 +40,6 @@ namespace std {
 
 namespace integral {
 
-  void initialization() {
-    { const int a{}; static_assert(a == 0, ""); }
-    { const int a = {}; static_assert(a == 0, ""); }
-    { const int a{1}; static_assert(a == 1, ""); }
-    { const int a = {1}; static_assert(a == 1, ""); }
-    { const int a{1, 2}; } // expected-error {{excess elements}}
-    { const int a = {1, 2}; } // expected-error {{excess elements}}
-    { const short a{100000}; } // expected-error {{narrowing conversion}}
-    { const short a = {100000}; } // expected-error {{narrowing conversion}}
-  }
-
-  int function_call() {
-    void takes_int(int);
-    takes_int({1});
-
-    int ar[10];
-    (void) ar[{1}]; // expected-error {{initializer list is illegal with the built-in index operator}}
-
-    return {1};
-  }
-
-  void inline_init() {
-    (void) int{1};
-    (void) new int{1};
-  }
-
   void initializer_list() {
     std::initializer_list<int> il = { 1, 2, 3 };
     std::initializer_list<double> dl = { 1.0, 2.0, 3 };
@@ -76,32 +50,56 @@ namespace integral {
     for (int i : {1, 2, 3, 4}) {}
   }
 
-  struct A {
-    int i;
-    A() : i{1} {}
-  };
-
 }
 
 namespace objects {
+
+  struct X1 { X1(int); };
+  struct X2 { explicit X2(int); };
 
   template <int N>
   struct A {
     A() { static_assert(N == 0, ""); }
     A(int, double) { static_assert(N == 1, ""); }
-    A(int, int) { static_assert(N == 2, ""); }
     A(std::initializer_list<int>) { static_assert(N == 3, ""); }
   };
 
-  void initialization() {
+  template <int N>
+  struct D {
+    D(std::initializer_list<int>) { static_assert(N == 0, ""); } // expected-note 1 {{candidate}}
+    D(std::initializer_list<double>) { static_assert(N == 1, ""); } // expected-note 1 {{candidate}}
+  };
+
+  template <int N>
+  struct E {
+    E(int, int) { static_assert(N == 0, ""); }
+    E(X1, int) { static_assert(N == 1, ""); }
+  };
+
+  void overload_resolution() {
     { A<0> a{}; }
     { A<0> a = {}; }
-    { A<1> a{1, 1.0}; }
-    { A<1> a = {1, 1.0}; }
+    // Narrowing conversions don't affect viability. The next two choose
+    // the initializer_list constructor.
+    { A<3> a{1, 1.0}; } // expected-error {{narrowing conversion}}
+    { A<3> a = {1, 1.0}; } // expected-error {{narrowing conversion}}
     { A<3> a{1, 2, 3, 4, 5, 6, 7, 8}; }
     { A<3> a = {1, 2, 3, 4, 5, 6, 7, 8}; }
     { A<3> a{1, 2, 3, 4, 5, 6, 7, 8}; }
     { A<3> a{1, 2}; }
+
+    { D<0> d{1, 2, 3}; }
+    { D<1> d{1.0, 2.0, 3.0}; }
+    { D<-1> d{1, 2.0}; } // expected-error {{ambiguous}}
+
+    { E<0> e{1, 2}; }
+  }
+
+  void explicit_implicit() {
+    { X1 x{0}; }
+    { X1 x = {0}; }
+    { X2 x{0}; }
+    { X2 x = {0}; } // expected-error {{explicit}}
   }
 
   struct C {

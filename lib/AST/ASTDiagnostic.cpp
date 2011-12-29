@@ -129,7 +129,7 @@ break; \
 /// \brief Convert the given type to a string suitable for printing as part of 
 /// a diagnostic.
 ///
-/// There are three main criteria when determining whether we should have an
+/// There are four main criteria when determining whether we should have an
 /// a.k.a. clause when pretty-printing a type:
 ///
 /// 1) Some types provide very minimal sugar that doesn't impede the
@@ -142,22 +142,58 @@ break; \
 ///    want to desugar these, even if we do produce an a.k.a. clause.
 /// 3) Some types may have already been desugared previously in this diagnostic.
 ///    if this is the case, doing another "aka" would just be clutter.
+/// 4) Two different types within the same diagnostic have the same output
+///    string.  In this case, force an a.k.a with the desugared type when
+///    doing so will provide additional information.
 ///
 /// \param Context the context in which the type was allocated
 /// \param Ty the type to print
+/// \param QualTypeVals pointer values to QualTypes which are used in the
+/// diagnostic message
 static std::string
 ConvertTypeToDiagnosticString(ASTContext &Context, QualType Ty,
-                              const Diagnostic::ArgumentValue *PrevArgs,
-                              unsigned NumPrevArgs) {
+                              const DiagnosticsEngine::ArgumentValue *PrevArgs,
+                              unsigned NumPrevArgs,
+                              SmallVectorImpl<intptr_t> &QualTypeVals) {
   // FIXME: Playing with std::string is really slow.
-  std::string S = Ty.getAsString(Context.PrintingPolicy);
+  bool ForceAKA = false;
+  QualType CanTy = Ty.getCanonicalType();
+  std::string S = Ty.getAsString(Context.getPrintingPolicy());
+  std::string CanS = CanTy.getAsString(Context.getPrintingPolicy());
+
+  for (SmallVectorImpl<intptr_t>::iterator I = QualTypeVals.begin(),
+       E = QualTypeVals.end(); I != E; ++I) {
+    QualType CompareTy =
+        QualType::getFromOpaquePtr(reinterpret_cast<void*>(*I));
+    if (CompareTy == Ty)
+      continue;  // Same types
+    QualType CompareCanTy = CompareTy.getCanonicalType();
+    if (CompareCanTy == CanTy)
+      continue;  // Same canonical types
+    std::string CompareS = CompareTy.getAsString(Context.getPrintingPolicy());
+    bool aka;
+    QualType CompareDesugar = Desugar(Context, CompareTy, aka);
+    std::string CompareDesugarStr =
+        CompareDesugar.getAsString(Context.getPrintingPolicy());
+    if (CompareS != S && CompareDesugarStr != S)
+      continue;  // The type string is different than the comparison string
+                 // and the desugared comparison string.
+    std::string CompareCanS =
+        CompareCanTy.getAsString(Context.getPrintingPolicy());
+    
+    if (CompareCanS == CanS)
+      continue;  // No new info from canonical type
+
+    ForceAKA = true;
+    break;
+  }
 
   // Check to see if we already desugared this type in this
   // diagnostic.  If so, don't do it again.
   bool Repeated = false;
   for (unsigned i = 0; i != NumPrevArgs; ++i) {
     // TODO: Handle ak_declcontext case.
-    if (PrevArgs[i].first == Diagnostic::ak_qualtype) {
+    if (PrevArgs[i].first == DiagnosticsEngine::ak_qualtype) {
       void *Ptr = (void*)PrevArgs[i].second;
       QualType PrevTy(QualType::getFromOpaquePtr(Ptr));
       if (PrevTy == Ty) {
@@ -172,11 +208,15 @@ ConvertTypeToDiagnosticString(ASTContext &Context, QualType Ty,
   if (!Repeated) {
     bool ShouldAKA = false;
     QualType DesugaredTy = Desugar(Context, Ty, ShouldAKA);
-    if (ShouldAKA) {
-      S = "'" + S + "' (aka '";
-      S += DesugaredTy.getAsString(Context.PrintingPolicy);
-      S += "')";
-      return S;
+    if (ShouldAKA || ForceAKA) {
+      if (DesugaredTy == Ty) {
+        DesugaredTy = Ty.getCanonicalType();
+      }
+      std::string akaStr = DesugaredTy.getAsString(Context.getPrintingPolicy());
+      if (akaStr != S) {
+        S = "'" + S + "' (aka '" + akaStr + "')";
+        return S;
+      }
     }
   }
 
@@ -184,33 +224,36 @@ ConvertTypeToDiagnosticString(ASTContext &Context, QualType Ty,
   return S;
 }
 
-void clang::FormatASTNodeDiagnosticArgument(Diagnostic::ArgumentKind Kind, 
-                                            intptr_t Val,
-                                            const char *Modifier, 
-                                            unsigned ModLen,
-                                            const char *Argument, 
-                                            unsigned ArgLen,
-                                    const Diagnostic::ArgumentValue *PrevArgs,
-                                            unsigned NumPrevArgs,
-                                            llvm::SmallVectorImpl<char> &Output,
-                                            void *Cookie) {
+void clang::FormatASTNodeDiagnosticArgument(
+    DiagnosticsEngine::ArgumentKind Kind,
+    intptr_t Val,
+    const char *Modifier,
+    unsigned ModLen,
+    const char *Argument,
+    unsigned ArgLen,
+    const DiagnosticsEngine::ArgumentValue *PrevArgs,
+    unsigned NumPrevArgs,
+    SmallVectorImpl<char> &Output,
+    void *Cookie,
+    SmallVectorImpl<intptr_t> &QualTypeVals) {
   ASTContext &Context = *static_cast<ASTContext*>(Cookie);
   
   std::string S;
   bool NeedQuotes = true;
   
   switch (Kind) {
-    default: assert(0 && "unknown ArgumentKind");
-    case Diagnostic::ak_qualtype: {
+    default: llvm_unreachable("unknown ArgumentKind");
+    case DiagnosticsEngine::ak_qualtype: {
       assert(ModLen == 0 && ArgLen == 0 &&
              "Invalid modifier for QualType argument");
       
       QualType Ty(QualType::getFromOpaquePtr(reinterpret_cast<void*>(Val)));
-      S = ConvertTypeToDiagnosticString(Context, Ty, PrevArgs, NumPrevArgs);
+      S = ConvertTypeToDiagnosticString(Context, Ty, PrevArgs, NumPrevArgs,
+                                        QualTypeVals);
       NeedQuotes = false;
       break;
     }
-    case Diagnostic::ak_declarationname: {
+    case DiagnosticsEngine::ak_declarationname: {
       DeclarationName N = DeclarationName::getFromOpaqueInteger(Val);
       S = N.getAsString();
       
@@ -224,7 +267,7 @@ void clang::FormatASTNodeDiagnosticArgument(Diagnostic::ArgumentKind Kind,
                "Invalid modifier for DeclarationName argument");
       break;
     }
-    case Diagnostic::ak_nameddecl: {
+    case DiagnosticsEngine::ak_nameddecl: {
       bool Qualified;
       if (ModLen == 1 && Modifier[0] == 'q' && ArgLen == 0)
         Qualified = true;
@@ -233,18 +276,18 @@ void clang::FormatASTNodeDiagnosticArgument(Diagnostic::ArgumentKind Kind,
                "Invalid modifier for NamedDecl* argument");
         Qualified = false;
       }
-      reinterpret_cast<NamedDecl*>(Val)->
-      getNameForDiagnostic(S, Context.PrintingPolicy, Qualified);
+      const NamedDecl *ND = reinterpret_cast<const NamedDecl*>(Val);
+      ND->getNameForDiagnostic(S, Context.getPrintingPolicy(), Qualified);
       break;
     }
-    case Diagnostic::ak_nestednamespec: {
+    case DiagnosticsEngine::ak_nestednamespec: {
       llvm::raw_string_ostream OS(S);
       reinterpret_cast<NestedNameSpecifier*>(Val)->print(OS,
-                                                        Context.PrintingPolicy);
+                                                        Context.getPrintingPolicy());
       NeedQuotes = false;
       break;
     }
-    case Diagnostic::ak_declcontext: {
+    case DiagnosticsEngine::ak_declcontext: {
       DeclContext *DC = reinterpret_cast<DeclContext *> (Val);
       assert(DC && "Should never have a null declaration context");
       
@@ -257,7 +300,7 @@ void clang::FormatASTNodeDiagnosticArgument(Diagnostic::ArgumentKind Kind,
       } else if (TypeDecl *Type = dyn_cast<TypeDecl>(DC)) {
         S = ConvertTypeToDiagnosticString(Context, 
                                           Context.getTypeDeclType(Type),
-                                          PrevArgs, NumPrevArgs);
+                                          PrevArgs, NumPrevArgs, QualTypeVals);
       } else {
         // FIXME: Get these strings from some localized place
         NamedDecl *ND = cast<NamedDecl>(DC);
@@ -269,7 +312,7 @@ void clang::FormatASTNodeDiagnosticArgument(Diagnostic::ArgumentKind Kind,
           S += "function ";
         
         S += "'";
-        ND->getNameForDiagnostic(S, Context.PrintingPolicy, true);
+        ND->getNameForDiagnostic(S, Context.getPrintingPolicy(), true);
         S += "'";
       }
       NeedQuotes = false;

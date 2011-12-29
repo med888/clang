@@ -27,10 +27,10 @@ int A::C::cx = 17;
 static int A::C::cx2 = 17; // expected-error{{'static' can}}
 
 class C2 {
-  void m(); // expected-note{{member declaration nearly matches}}
+  void m(); // expected-note{{member declaration does not match because it is not const qualified}}
 
-  void f(const int& parm); // expected-note{{member declaration nearly matches}}
-  void f(int) const; // expected-note{{member declaration nearly matches}}
+  void f(const int& parm); // expected-note{{type of 1st parameter of member declaration does not match definition ('const int &' vs 'int')}}
+  void f(int) const; // expected-note{{member declaration does not match because it is const qualified}}
   void f(float);
 
   int x;
@@ -121,7 +121,7 @@ namespace E {
 
 
 class Operators {
-  Operators operator+(const Operators&) const; // expected-note{{member declaration nearly matches}}
+  Operators operator+(const Operators&) const; // expected-note{{member declaration does not match because it is const qualified}}
   operator bool();
 };
 
@@ -140,7 +140,7 @@ Operators::operator bool() {
 }
 
 namespace A {
-  void g(int&); // expected-note{{member declaration nearly matches}}
+  void g(int&); // expected-note{{type of 1st parameter of member declaration does not match definition ('int &' vs 'const int &')}}
 } 
 
 void A::f() {} // expected-error{{out-of-line definition of 'f' does not match any declaration in namespace 'A'}}
@@ -261,8 +261,27 @@ namespace PR8159 {
 
 namespace rdar7980179 {
   class A { void f0(); }; // expected-note {{previous}}
-  int A::f0() {} // expected-error {{out-of-line definition of 'rdar7980179::A::f0' differ from the declaration in the return type}}
+  int A::f0() {} // expected-error {{out-of-line definition of 'rdar7980179::A::f0' differs from the declaration in the return type}}
 }
 
 namespace alias = A;
 double *dp = (alias::C*)0; // expected-error{{cannot initialize a variable of type 'double *' with an rvalue of type 'alias::C *'}}
+
+// http://llvm.org/PR10109
+namespace PR10109 {
+template<typename T>
+struct A {
+protected:
+  struct B;
+  struct B::C; // expected-error {{requires a template parameter list}} \
+               // expected-error {{no struct named 'C'}}
+};
+
+template<typename T>
+struct A2 {
+protected:
+  struct B;
+};
+template <typename T>
+struct A2<T>::B::C; // expected-error {{no struct named 'C'}}
+}

@@ -1,7 +1,7 @@
-// RUN: %clang_cc1 -analyze -analyzer-checker=core,unix.experimental.CString,deadcode.experimental.UnreachableCode -analyzer-store=region -Wno-null-dereference -verify %s
-// RUN: %clang_cc1 -analyze -DUSE_BUILTINS -analyzer-checker=core,unix.experimental.CString,deadcode.experimental.UnreachableCode -analyzer-store=region -Wno-null-dereference -verify %s
-// RUN: %clang_cc1 -analyze -DVARIANT -analyzer-checker=core,unix.experimental.CString,deadcode.experimental.UnreachableCode -analyzer-store=region -Wno-null-dereference -verify %s
-// RUN: %clang_cc1 -analyze -DUSE_BUILTINS -DVARIANT -analyzer-checker=core,unix.experimental.CString,deadcode.experimental.UnreachableCode -analyzer-store=region -Wno-null-dereference -verify %s
+// RUN: %clang_cc1 -analyze -analyzer-checker=core,experimental.unix.CString,experimental.deadcode.UnreachableCode -analyzer-store=region -Wno-null-dereference -verify %s
+// RUN: %clang_cc1 -analyze -DUSE_BUILTINS -analyzer-checker=core,experimental.unix.CString,experimental.deadcode.UnreachableCode -analyzer-store=region -Wno-null-dereference -verify %s
+// RUN: %clang_cc1 -analyze -DVARIANT -analyzer-checker=core,experimental.unix.CString,experimental.deadcode.UnreachableCode -analyzer-store=region -Wno-null-dereference -verify %s
+// RUN: %clang_cc1 -analyze -DUSE_BUILTINS -DVARIANT -analyzer-checker=experimental.security.taint,core,experimental.unix.CString,experimental.deadcode.UnreachableCode -analyzer-store=region -Wno-null-dereference -verify %s
 
 //===----------------------------------------------------------------------===
 // Declarations
@@ -26,6 +26,7 @@
 
 #define NULL 0
 typedef typeof(sizeof(int)) size_t;
+int scanf(const char *restrict format, ...);
 
 //===----------------------------------------------------------------------===
 // strlen()
@@ -132,6 +133,18 @@ void strlen_indirect(char *x) {
     (void)*(char*)0; // expected-warning{{null}}
 }
 
+void strlen_indirect2(char *x) {
+  size_t a = strlen(x);
+  char *p = x;
+  char **p2 = &p;
+  extern void use_string_ptr2(char**);
+  use_string_ptr2(p2);
+
+  size_t c = strlen(x);
+  if (a == 0 && c != 0)
+    (void)*(char*)0; // expected-warning{{null}}
+}
+
 void strlen_liveness(const char *x) {
   if (strlen(x) < 5)
     return;
@@ -143,24 +156,23 @@ void strlen_liveness(const char *x) {
 // strnlen()
 //===----------------------------------------------------------------------===
 
-#define strnlen BUILTIN(strnlen)
 size_t strnlen(const char *s, size_t maxlen);
 
 void strnlen_constant0() {
   if (strnlen("123", 10) != 3)
-    (void)*(char*)0; // no-warning
+    (void)*(char*)0; // expected-warning{{never executed}}
 }
 
 void strnlen_constant1() {
   const char *a = "123";
   if (strnlen(a, 10) != 3)
-    (void)*(char*)0; // no-warning
+    (void)*(char*)0; // expected-warning{{never executed}}
 }
 
 void strnlen_constant2(char x) {
   char a[] = "123";
   if (strnlen(a, 10) != 3)
-    (void)*(char*)0; // no-warning
+    (void)*(char*)0; // expected-warning{{never executed}}
   a[0] = x;
   if (strnlen(a, 10) != 3)
     (void)*(char*)0; // expected-warning{{null}}
@@ -168,19 +180,19 @@ void strnlen_constant2(char x) {
 
 void strnlen_constant4() {
   if (strnlen("123456", 3) != 3)
-    (void)*(char*)0; // no-warning
+    (void)*(char*)0; // expected-warning{{never executed}}
 }
 
 void strnlen_constant5() {
   const char *a = "123456";
   if (strnlen(a, 3) != 3)
-    (void)*(char*)0; // no-warning
+    (void)*(char*)0; // expected-warning{{never executed}}
 }
 
 void strnlen_constant6(char x) {
   char a[] = "123456";
   if (strnlen(a, 3) != 3)
-    (void)*(char*)0; // no-warning
+    (void)*(char*)0; // expected-warning{{never executed}}
   a[0] = x;
   if (strnlen(a, 3) != 3)
     (void)*(char*)0; // expected-warning{{null}}
@@ -201,7 +213,7 @@ label:
 
 void strnlen_zero() {
   if (strnlen("abc", 0) != 0)
-    (void)*(char*)0; // no-warning
+    (void)*(char*)0; // expected-warning{{never executed}}
   if (strnlen(NULL, 0) != 0) // no-warning
     (void)*(char*)0; // no-warning
 }
@@ -437,6 +449,13 @@ void strcat_symbolic_src_length(char *src) {
 		(void)*(char*)0; // no-warning
 }
 
+void strcat_symbolic_dst_length_taint(char *dst) {
+  scanf("%s", dst); // Taint data.
+  strcat(dst, "1234");
+  if (strlen(dst) < 4)
+    (void)*(char*)0; // no-warning
+}
+
 void strcat_unknown_src_length(char *src, int offset) {
 	char dst[8] = "1234";
 	strcat(dst, &src[offset]);
@@ -604,25 +623,25 @@ void strncat_effects(char *y) {
 void strncat_overflow_0(char *y) {
   char x[4] = "12";
   if (strlen(y) == 4)
-    strncat(x, y, strlen(y)); // expected-warning{{String copy function overflows destination buffer}}
+    strncat(x, y, strlen(y)); // expected-warning{{Size argument is greater than the free space in the destination buffer}}
 }
 
 void strncat_overflow_1(char *y) {
   char x[4] = "12";
   if (strlen(y) == 3)
-    strncat(x, y, strlen(y)); // expected-warning{{String copy function overflows destination buffer}}
+    strncat(x, y, strlen(y)); // expected-warning{{Size argument is greater than the free space in the destination buffer}}
 }
 
 void strncat_overflow_2(char *y) {
   char x[4] = "12";
   if (strlen(y) == 2)
-    strncat(x, y, strlen(y)); // expected-warning{{String copy function overflows destination buffer}}
+    strncat(x, y, strlen(y)); // expected-warning{{Size argument is greater than the free space in the destination buffer}}
 }
 
 void strncat_overflow_3(char *y) {
   char x[4] = "12";
   if (strlen(y) == 4)
-    strncat(x, y, 2); // expected-warning{{String copy function overflows destination buffer}}
+    strncat(x, y, 2); // expected-warning{{Size argument is greater than the free space in the destination buffer}}
 }
 void strncat_no_overflow_1(char *y) {
   char x[5] = "12";
@@ -634,6 +653,63 @@ void strncat_no_overflow_2(char *y) {
   char x[4] = "12";
   if (strlen(y) == 4)
     strncat(x, y, 1); // no-warning
+}
+
+void strncat_symbolic_dst_length(char *dst) {
+  strncat(dst, "1234", 5);
+  if (strlen(dst) < 4)
+    (void)*(char*)0; // no-warning
+}
+
+void strncat_symbolic_src_length(char *src) {
+  char dst[8] = "1234";
+  strncat(dst, src, 3);
+  if (strlen(dst) < 4)
+    (void)*(char*)0; // no-warning
+
+  char dst2[8] = "1234";
+  strncat(dst2, src, 4); // expected-warning{{Size argument is greater than the free space in the destination buffer}}
+}
+
+void strncat_unknown_src_length(char *src, int offset) {
+  char dst[8] = "1234";
+  strncat(dst, &src[offset], 3);
+  if (strlen(dst) < 4)
+    (void)*(char*)0; // no-warning
+
+  char dst2[8] = "1234";
+  strncat(dst2, &src[offset], 4); // expected-warning{{Size argument is greater than the free space in the destination buffer}}
+}
+
+// There is no strncat_unknown_dst_length because if we can't get a symbolic
+// length for the "before" strlen, we won't be able to set one for "after".
+
+void strncat_symbolic_limit(unsigned limit) {
+  char dst[6] = "1234";
+  char src[] = "567";
+  strncat(dst, src, limit); // no-warning
+  if (strlen(dst) < 4)
+    (void)*(char*)0; // no-warning
+  if (strlen(dst) == 4)
+    (void)*(char*)0; // expected-warning{{null}}
+}
+
+void strncat_unknown_limit(float limit) {
+  char dst[6] = "1234";
+  char src[] = "567";
+  strncat(dst, src, (size_t)limit); // no-warning
+  if (strlen(dst) < 4)
+    (void)*(char*)0; // no-warning
+  if (strlen(dst) == 4)
+    (void)*(char*)0; // expected-warning{{null}}
+}
+
+void strncat_too_big(char *dst, char *src) {
+  if (strlen(dst) != (((size_t)0) - 2))
+    return;
+  if (strlen(src) != 2)
+    return;
+  strncat(dst, src, 2); // expected-warning{{This expression will create a string whose length is too big to be represented as a size_t}}
 }
 
 //===----------------------------------------------------------------------===

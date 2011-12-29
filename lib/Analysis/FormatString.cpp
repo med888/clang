@@ -13,6 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "FormatStringParsing.h"
+#include "clang/Basic/LangOptions.h"
 
 using clang::analyze_format_string::ArgTypeResult;
 using clang::analyze_format_string::FormatStringHandler;
@@ -175,7 +176,9 @@ clang::analyze_format_string::ParseArgPosition(FormatStringHandler &H,
 bool
 clang::analyze_format_string::ParseLengthModifier(FormatSpecifier &FS,
                                                   const char *&I,
-                                                  const char *E) {
+                                                  const char *E,
+                                                  const LangOptions &LO,
+                                                  bool IsScanf) {
   LengthModifier::Kind lmKind = LengthModifier::None;
   const char *lmPosition = I;
   switch (*I) {
@@ -183,19 +186,32 @@ clang::analyze_format_string::ParseLengthModifier(FormatSpecifier &FS,
       return false;
     case 'h':
       ++I;
-      lmKind = (I != E && *I == 'h') ?
-      ++I, LengthModifier::AsChar : LengthModifier::AsShort;
+      lmKind = (I != E && *I == 'h') ? (++I, LengthModifier::AsChar)
+                                     : LengthModifier::AsShort;
       break;
     case 'l':
       ++I;
-      lmKind = (I != E && *I == 'l') ?
-      ++I, LengthModifier::AsLongLong : LengthModifier::AsLong;
+      lmKind = (I != E && *I == 'l') ? (++I, LengthModifier::AsLongLong)
+                                     : LengthModifier::AsLong;
       break;
     case 'j': lmKind = LengthModifier::AsIntMax;     ++I; break;
     case 'z': lmKind = LengthModifier::AsSizeT;      ++I; break;
     case 't': lmKind = LengthModifier::AsPtrDiff;    ++I; break;
     case 'L': lmKind = LengthModifier::AsLongDouble; ++I; break;
     case 'q': lmKind = LengthModifier::AsLongLong;   ++I; break;
+    case 'a':
+      if (IsScanf && !LO.C99 && !LO.CPlusPlus0x) {
+        // For scanf in C90, look at the next character to see if this should
+        // be parsed as the GNU extension 'a' length modifier. If not, this
+        // will be parsed as a conversion specifier.
+        ++I;
+        if (I != E && (*I == 's' || *I == 'S' || *I == '[')) {
+          lmKind = LengthModifier::AsAllocate;
+          break;
+        }
+        --I;
+      }
+      return false;
   }
   LengthModifier lm(lmPosition, lmKind);
   FS.setLengthModifier(lm);
@@ -209,16 +225,30 @@ clang::analyze_format_string::ParseLengthModifier(FormatSpecifier &FS,
 bool ArgTypeResult::matchesType(ASTContext &C, QualType argTy) const {
   switch (K) {
     case InvalidTy:
-      assert(false && "ArgTypeResult must be valid");
-      return true;
+      llvm_unreachable("ArgTypeResult must be valid");
 
     case UnknownTy:
       return true;
-
+      
+    case AnyCharTy: {
+      if (const BuiltinType *BT = argTy->getAs<BuiltinType>())
+        switch (BT->getKind()) {
+          default:
+            break;
+          case BuiltinType::Char_S:
+          case BuiltinType::SChar:
+          case BuiltinType::UChar:
+          case BuiltinType::Char_U:
+            return true;            
+        }
+      return false;
+    }
+      
     case SpecificTy: {
       argTy = C.getCanonicalType(argTy).getUnqualifiedType();
       if (T == argTy)
         return true;
+      // Check for "compatible types".
       if (const BuiltinType *BT = argTy->getAs<BuiltinType>())
         switch (BT->getKind()) {
           default:
@@ -227,7 +257,7 @@ bool ArgTypeResult::matchesType(ASTContext &C, QualType argTy) const {
           case BuiltinType::SChar:
             return T == C.UnsignedCharTy;
           case BuiltinType::Char_U:
-          case BuiltinType::UChar:
+          case BuiltinType::UChar:                    
             return T == C.SignedCharTy;
           case BuiltinType::Short:
             return T == C.UnsignedShortTy;
@@ -300,8 +330,7 @@ bool ArgTypeResult::matchesType(ASTContext &C, QualType argTy) const {
         argTy->isNullPtrType();
 
     case ObjCPointerTy:
-      return argTy->getAs<ObjCObjectPointerType>() != NULL ||
-             argTy->getAs<BlockPointerType>() != NULL;
+      return argTy->getAs<ObjCObjectPointerType>() != NULL;
   }
 
   // FIXME: Should be unreachable, but Clang is currently emitting
@@ -312,10 +341,11 @@ bool ArgTypeResult::matchesType(ASTContext &C, QualType argTy) const {
 QualType ArgTypeResult::getRepresentativeType(ASTContext &C) const {
   switch (K) {
     case InvalidTy:
-      assert(false && "No representative type for Invalid ArgTypeResult");
-      // Fall-through.
+      llvm_unreachable("No representative type for Invalid ArgTypeResult");
     case UnknownTy:
       return QualType();
+    case AnyCharTy:
+      return C.CharTy;
     case SpecificTy:
       return T;
     case CStrTy:
@@ -336,6 +366,14 @@ QualType ArgTypeResult::getRepresentativeType(ASTContext &C) const {
   // a warning.
   return QualType();
 }
+
+std::string ArgTypeResult::getRepresentativeTypeName(ASTContext &C) const {
+  std::string S = getRepresentativeType(C).getAsString();
+  if (Name)
+    return std::string("'") + Name + "' (aka '" + S + "')";
+  return std::string("'") + S + "'";
+}
+
 
 //===----------------------------------------------------------------------===//
 // Methods on OptionalAmount.
@@ -369,8 +407,51 @@ analyze_format_string::LengthModifier::toString() const {
     return "t";
   case AsLongDouble:
     return "L";
+  case AsAllocate:
+    return "a";
   case None:
     return "";
+  }
+  return NULL;
+}
+
+//===----------------------------------------------------------------------===//
+// Methods on ConversionSpecifier.
+//===----------------------------------------------------------------------===//
+
+const char *ConversionSpecifier::toString() const {
+  switch (kind) {
+  case dArg: return "d";
+  case iArg: return "i";
+  case oArg: return "o";
+  case uArg: return "u";
+  case xArg: return "x";
+  case XArg: return "X";
+  case fArg: return "f";
+  case FArg: return "F";
+  case eArg: return "e";
+  case EArg: return "E";
+  case gArg: return "g";
+  case GArg: return "G";
+  case aArg: return "a";
+  case AArg: return "A";
+  case cArg: return "c";
+  case sArg: return "s";
+  case pArg: return "p";
+  case nArg: return "n";
+  case PercentArg:  return "%";
+  case ScanListArg: return "[";
+  case InvalidSpecifier: return NULL;
+
+  // MacOS X unicode extensions.
+  case CArg: return "C";
+  case SArg: return "S";
+
+  // Objective-C specific specifiers.
+  case ObjCObjArg: return "@";
+
+  // GlibC specific specifiers.
+  case PrintErrno: return "m";
   }
   return NULL;
 }
@@ -379,7 +460,7 @@ analyze_format_string::LengthModifier::toString() const {
 // Methods on OptionalAmount.
 //===----------------------------------------------------------------------===//
 
-void OptionalAmount::toString(llvm::raw_ostream &os) const {
+void OptionalAmount::toString(raw_ostream &os) const {
   switch (hs) {
   case Invalid:
   case NotSpecified:
@@ -399,10 +480,6 @@ void OptionalAmount::toString(llvm::raw_ostream &os) const {
     break;
   }
 }
-
-//===----------------------------------------------------------------------===//
-// Methods on ConversionSpecifier.
-//===----------------------------------------------------------------------===//
 
 bool FormatSpecifier::hasValidLengthModifier() const {
   switch (LM.getKind()) {
@@ -468,8 +545,15 @@ bool FormatSpecifier::hasValidLengthModifier() const {
         default:
           return false;
       }
+
+    case LengthModifier::AsAllocate:
+      switch (CS.getKind()) {
+        case ConversionSpecifier::sArg:
+        case ConversionSpecifier::SArg:
+          return true;
+        default:
+          return false;
+      }
   }
   return false;
 }
-
-

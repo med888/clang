@@ -13,11 +13,11 @@
 
 #include "CodeGenFunction.h"
 #include "CodeGenModule.h"
+#include "CGCUDARuntime.h"
 #include "CGCXXABI.h"
 #include "CGDebugInfo.h"
 #include "CGException.h"
 #include "clang/Basic/TargetInfo.h"
-#include "clang/AST/APValue.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclCXX.h"
@@ -30,10 +30,10 @@ using namespace CodeGen;
 
 CodeGenFunction::CodeGenFunction(CodeGenModule &cgm)
   : CodeGenTypeCache(cgm), CGM(cgm),
-    Target(CGM.getContext().Target), Builder(cgm.getModule().getContext()),
+    Target(CGM.getContext().getTargetInfo()), Builder(cgm.getModule().getContext()),
     AutoreleaseResult(false), BlockInfo(0), BlockPointer(0),
-    NormalCleanupDest(0), EHCleanupDest(0), NextCleanupDestIndex(1),
-    ExceptionSlot(0), EHSelectorSlot(0),
+    NormalCleanupDest(0), NextCleanupDestIndex(1), FirstBlockInfo(0), 
+    EHResumeBlock(0), ExceptionSlot(0), EHSelectorSlot(0),
     DebugInfo(0), DisableDebugInfo(false), DidCallStackSave(false),
     IndirectBranch(0), SwitchInsn(0), CaseRangeBlock(0), UnreachableBlock(0),
     CXXThisDecl(0), CXXThisValue(0), CXXVTTDecl(0), CXXVTTValue(0),
@@ -44,12 +44,20 @@ CodeGenFunction::CodeGenFunction(CodeGenModule &cgm)
   CGM.getCXXABI().getMangleContext().startNewFunction();
 }
 
+CodeGenFunction::~CodeGenFunction() {
+  // If there are any unclaimed block infos, go ahead and destroy them
+  // now.  This can happen if IR-gen gets clever and skips evaluating
+  // something.
+  if (FirstBlockInfo)
+    destroyBlockInfos(FirstBlockInfo);
+}
 
-const llvm::Type *CodeGenFunction::ConvertTypeForMem(QualType T) {
+
+llvm::Type *CodeGenFunction::ConvertTypeForMem(QualType T) {
   return CGM.getTypes().ConvertTypeForMem(T);
 }
 
-const llvm::Type *CodeGenFunction::ConvertType(QualType T) {
+llvm::Type *CodeGenFunction::ConvertType(QualType T) {
   return CGM.getTypes().ConvertType(T);
 }
 
@@ -86,6 +94,10 @@ bool CodeGenFunction::hasAggregateLLVMType(QualType type) {
   case Type::ObjCObject:
   case Type::ObjCInterface:
     return true;
+
+  // In IRGen, atomic types are just the underlying type
+  case Type::Atomic:
+    return hasAggregateLLVMType(type->getAs<AtomicType>()->getValueType());
   }
   llvm_unreachable("unknown type kind!");
 }
@@ -116,7 +128,8 @@ void CodeGenFunction::EmitReturnBlock() {
       dyn_cast<llvm::BranchInst>(*ReturnBlock.getBlock()->use_begin());
     if (BI && BI->isUnconditional() &&
         BI->getSuccessor(0) == ReturnBlock.getBlock()) {
-      // Reset insertion point and delete the branch.
+      // Reset insertion point, including debug location, and delete the branch.
+      Builder.SetCurrentDebugLocation(BI->getDebugLoc());
       Builder.SetInsertPoint(BI->getParent());
       BI->eraseFromParent();
       delete ReturnBlock.getBlock();
@@ -189,7 +202,7 @@ void CodeGenFunction::FinishFunction(SourceLocation EndLoc) {
     }
   }
 
-  EmitIfUsed(*this, RethrowBlock.getBlock());
+  EmitIfUsed(*this, EHResumeBlock);
   EmitIfUsed(*this, TerminateLandingPad);
   EmitIfUsed(*this, TerminateHandler);
   EmitIfUsed(*this, UnreachableBlock);
@@ -213,15 +226,15 @@ bool CodeGenFunction::ShouldInstrumentFunction() {
 /// function instrumentation is enabled.
 void CodeGenFunction::EmitFunctionInstrumentation(const char *Fn) {
   // void __cyg_profile_func_{enter,exit} (void *this_fn, void *call_site);
-  const llvm::PointerType *PointerTy = Int8PtrTy;
-  const llvm::Type *ProfileFuncArgs[] = { PointerTy, PointerTy };
-  const llvm::FunctionType *FunctionTy =
+  llvm::PointerType *PointerTy = Int8PtrTy;
+  llvm::Type *ProfileFuncArgs[] = { PointerTy, PointerTy };
+  llvm::FunctionType *FunctionTy =
     llvm::FunctionType::get(llvm::Type::getVoidTy(getLLVMContext()),
                             ProfileFuncArgs, false);
 
   llvm::Constant *F = CGM.CreateRuntimeFunction(FunctionTy, Fn);
   llvm::CallInst *CallSite = Builder.CreateCall(
-    CGM.getIntrinsic(llvm::Intrinsic::returnaddress, 0, 0),
+    CGM.getIntrinsic(llvm::Intrinsic::returnaddress),
     llvm::ConstantInt::get(Int32Ty, 0),
     "callsite");
 
@@ -292,11 +305,18 @@ void CodeGenFunction::StartFunction(GlobalDecl GD, QualType RetTy,
 
   // Emit subprogram debug descriptor.
   if (CGDebugInfo *DI = getDebugInfo()) {
-    // FIXME: what is going on here and why does it ignore all these
-    // interesting type properties?
+    unsigned NumArgs = 0;
+    QualType *ArgsArray = new QualType[Args.size()];
+    for (FunctionArgList::const_iterator i = Args.begin(), e = Args.end();
+	 i != e; ++i) {
+      ArgsArray[NumArgs++] = (*i)->getType();
+    }
+
     QualType FnType =
-      getContext().getFunctionType(RetTy, 0, 0,
+      getContext().getFunctionType(RetTy, ArgsArray, NumArgs,
                                    FunctionProtoType::ExtProtoInfo());
+
+    delete[] ArgsArray;
 
     DI->setLocation(StartLoc);
     DI->EmitFunctionStart(GD, FnType, CurFn, Builder);
@@ -343,8 +363,11 @@ void CodeGenFunction::StartFunction(GlobalDecl GD, QualType RetTy,
     QualType Ty = (*i)->getType();
 
     if (Ty->isVariablyModifiedType())
-      EmitVLASize(Ty);
+      EmitVariablyModifiedType(Ty);
   }
+  // Emit a location at the end of the prologue.
+  if (CGDebugInfo *DI = getDebugInfo())
+    DI->EmitLocation(Builder, StartLoc);
 }
 
 void CodeGenFunction::EmitFunctionBody(FunctionArgList &Args) {
@@ -364,9 +387,12 @@ static void TryMarkNoThrow(llvm::Function *F) {
   for (llvm::Function::iterator FI = F->begin(), FE = F->end(); FI != FE; ++FI)
     for (llvm::BasicBlock::iterator
            BI = FI->begin(), BE = FI->end(); BI != BE; ++BI)
-      if (llvm::CallInst *Call = dyn_cast<llvm::CallInst>(&*BI))
+      if (llvm::CallInst *Call = dyn_cast<llvm::CallInst>(&*BI)) {
         if (!Call->doesNotThrow())
           return;
+      } else if (isa<llvm::ResumeInst>(&*BI)) {
+        return;
+      }
   F->setDoesNotThrow(true);
 }
 
@@ -400,6 +426,10 @@ void CodeGenFunction::GenerateCode(GlobalDecl GD, llvm::Function *Fn,
     EmitDestructorBody(Args);
   else if (isa<CXXConstructorDecl>(FD))
     EmitConstructorBody(Args);
+  else if (getContext().getLangOptions().CUDA &&
+           !CGM.getCodeGenOpts().CUDAIsDevice &&
+           FD->hasAttr<CUDAGlobalAttr>())
+    CGM.getCUDARuntime().EmitDeviceStubBody(*this, Args);
   else
     EmitFunctionBody(Args);
 
@@ -489,15 +519,14 @@ bool CodeGenFunction::
 ConstantFoldsToSimpleInteger(const Expr *Cond, llvm::APInt &ResultInt) {
   // FIXME: Rename and handle conversion of other evaluatable things
   // to bool.
-  Expr::EvalResult Result;
-  if (!Cond->Evaluate(Result, getContext()) || !Result.Val.isInt() ||
-      Result.HasSideEffects)
+  llvm::APSInt Int;
+  if (!Cond->EvaluateAsInt(Int, getContext()))
     return false;  // Not foldable, not integer or not fully evaluatable.
-  
+
   if (CodeGenFunction::ContainsLabel(Cond))
     return false;  // Contains a label.
-  
-  ResultInt = Result.Val.getInt();
+
+  ResultInt = Int;
   return true;
 }
 
@@ -645,7 +674,7 @@ static void emitNonZeroVLAInit(CodeGenFunction &CGF, QualType baseType,
   llvm::Value *baseSizeInChars
     = llvm::ConstantInt::get(CGF.IntPtrTy, baseSizeAndAlign.first.getQuantity());
 
-  const llvm::Type *i8p = Builder.getInt8PtrTy();
+  llvm::Type *i8p = Builder.getInt8PtrTy();
 
   llvm::Value *begin = Builder.CreateBitCast(dest, i8p, "vla.begin");
   llvm::Value *end = Builder.CreateInBoundsGEP(dest, sizeInChars, "vla.end");
@@ -690,9 +719,9 @@ CodeGenFunction::EmitNullInitialization(llvm::Value *DestPtr, QualType Ty) {
   // Cast the dest ptr to the appropriate i8 pointer type.
   unsigned DestAS =
     cast<llvm::PointerType>(DestPtr->getType())->getAddressSpace();
-  const llvm::Type *BP = Builder.getInt8PtrTy(DestAS);
+  llvm::Type *BP = Builder.getInt8PtrTy(DestAS);
   if (DestPtr->getType() != BP)
-    DestPtr = Builder.CreateBitCast(DestPtr, BP, "tmp");
+    DestPtr = Builder.CreateBitCast(DestPtr, BP);
 
   // Get size and alignment info for this aggregate.
   std::pair<CharUnits, CharUnits> TypeInfo = 
@@ -709,13 +738,20 @@ CodeGenFunction::EmitNullInitialization(llvm::Value *DestPtr, QualType Ty) {
     if (const VariableArrayType *vlaType =
           dyn_cast_or_null<VariableArrayType>(
                                           getContext().getAsArrayType(Ty))) {
-      SizeVal = GetVLASize(vlaType);
+      QualType eltType;
+      llvm::Value *numElts;
+      llvm::tie(numElts, eltType) = getVLASize(vlaType);
+
+      SizeVal = numElts;
+      CharUnits eltSize = getContext().getTypeSizeInChars(eltType);
+      if (!eltSize.isOne())
+        SizeVal = Builder.CreateNUWMul(SizeVal, CGM.getSize(eltSize));
       vla = vlaType;
     } else {
       return;
     }
   } else {
-    SizeVal = llvm::ConstantInt::get(IntPtrTy, Size.getQuantity());
+    SizeVal = CGM.getSize(Size);
     vla = 0;
   }
 
@@ -733,7 +769,7 @@ CodeGenFunction::EmitNullInitialization(llvm::Value *DestPtr, QualType Ty) {
       new llvm::GlobalVariable(CGM.getModule(), NullConstant->getType(),
                                /*isConstant=*/true, 
                                llvm::GlobalVariable::PrivateLinkage,
-                               NullConstant, llvm::Twine());
+                               NullConstant, Twine());
     llvm::Value *SrcPtr =
       Builder.CreateBitCast(NullVariable, Builder.getInt8PtrTy());
 
@@ -778,60 +814,201 @@ llvm::BasicBlock *CodeGenFunction::GetIndirectGotoBlock() {
   return IndirectBranch->getParent();
 }
 
-llvm::Value *CodeGenFunction::GetVLASize(const VariableArrayType *VAT) {
-  llvm::Value *&SizeEntry = VLASizeMap[VAT->getSizeExpr()];
+/// Computes the length of an array in elements, as well as the base
+/// element type and a properly-typed first element pointer.
+llvm::Value *CodeGenFunction::emitArrayLength(const ArrayType *origArrayType,
+                                              QualType &baseType,
+                                              llvm::Value *&addr) {
+  const ArrayType *arrayType = origArrayType;
 
-  assert(SizeEntry && "Did not emit size for type");
-  return SizeEntry;
+  // If it's a VLA, we have to load the stored size.  Note that
+  // this is the size of the VLA in bytes, not its size in elements.
+  llvm::Value *numVLAElements = 0;
+  if (isa<VariableArrayType>(arrayType)) {
+    numVLAElements = getVLASize(cast<VariableArrayType>(arrayType)).first;
+
+    // Walk into all VLAs.  This doesn't require changes to addr,
+    // which has type T* where T is the first non-VLA element type.
+    do {
+      QualType elementType = arrayType->getElementType();
+      arrayType = getContext().getAsArrayType(elementType);
+
+      // If we only have VLA components, 'addr' requires no adjustment.
+      if (!arrayType) {
+        baseType = elementType;
+        return numVLAElements;
+      }
+    } while (isa<VariableArrayType>(arrayType));
+
+    // We get out here only if we find a constant array type
+    // inside the VLA.
+  }
+
+  // We have some number of constant-length arrays, so addr should
+  // have LLVM type [M x [N x [...]]]*.  Build a GEP that walks
+  // down to the first element of addr.
+  SmallVector<llvm::Value*, 8> gepIndices;
+
+  // GEP down to the array type.
+  llvm::ConstantInt *zero = Builder.getInt32(0);
+  gepIndices.push_back(zero);
+
+  // It's more efficient to calculate the count from the LLVM
+  // constant-length arrays than to re-evaluate the array bounds.
+  uint64_t countFromCLAs = 1;
+
+  llvm::ArrayType *llvmArrayType =
+    cast<llvm::ArrayType>(
+      cast<llvm::PointerType>(addr->getType())->getElementType());
+  while (true) {
+    assert(isa<ConstantArrayType>(arrayType));
+    assert(cast<ConstantArrayType>(arrayType)->getSize().getZExtValue()
+             == llvmArrayType->getNumElements());
+
+    gepIndices.push_back(zero);
+    countFromCLAs *= llvmArrayType->getNumElements();
+
+    llvmArrayType =
+      dyn_cast<llvm::ArrayType>(llvmArrayType->getElementType());
+    if (!llvmArrayType) break;
+
+    arrayType = getContext().getAsArrayType(arrayType->getElementType());
+    assert(arrayType && "LLVM and Clang types are out-of-synch");
+  }
+
+  baseType = arrayType->getElementType();
+
+  // Create the actual GEP.
+  addr = Builder.CreateInBoundsGEP(addr, gepIndices, "array.begin");
+
+  llvm::Value *numElements
+    = llvm::ConstantInt::get(SizeTy, countFromCLAs);
+
+  // If we had any VLA dimensions, factor them in.
+  if (numVLAElements)
+    numElements = Builder.CreateNUWMul(numVLAElements, numElements);
+
+  return numElements;
 }
 
-llvm::Value *CodeGenFunction::EmitVLASize(QualType Ty) {
-  assert(Ty->isVariablyModifiedType() &&
+std::pair<llvm::Value*, QualType>
+CodeGenFunction::getVLASize(QualType type) {
+  const VariableArrayType *vla = getContext().getAsVariableArrayType(type);
+  assert(vla && "type was not a variable array type!");
+  return getVLASize(vla);
+}
+
+std::pair<llvm::Value*, QualType>
+CodeGenFunction::getVLASize(const VariableArrayType *type) {
+  // The number of elements so far; always size_t.
+  llvm::Value *numElements = 0;
+
+  QualType elementType;
+  do {
+    elementType = type->getElementType();
+    llvm::Value *vlaSize = VLASizeMap[type->getSizeExpr()];
+    assert(vlaSize && "no size for VLA!");
+    assert(vlaSize->getType() == SizeTy);
+
+    if (!numElements) {
+      numElements = vlaSize;
+    } else {
+      // It's undefined behavior if this wraps around, so mark it that way.
+      numElements = Builder.CreateNUWMul(numElements, vlaSize);
+    }
+  } while ((type = getContext().getAsVariableArrayType(elementType)));
+
+  return std::pair<llvm::Value*,QualType>(numElements, elementType);
+}
+
+void CodeGenFunction::EmitVariablyModifiedType(QualType type) {
+  assert(type->isVariablyModifiedType() &&
          "Must pass variably modified type to EmitVLASizes!");
 
   EnsureInsertPoint();
 
-  if (const VariableArrayType *VAT = getContext().getAsVariableArrayType(Ty)) {
-    // unknown size indication requires no size computation.
-    if (!VAT->getSizeExpr())
-      return 0;
-    llvm::Value *&SizeEntry = VLASizeMap[VAT->getSizeExpr()];
+  // We're going to walk down into the type and look for VLA
+  // expressions.
+  type = type.getCanonicalType();
+  do {
+    assert(type->isVariablyModifiedType());
 
-    if (!SizeEntry) {
-      const llvm::Type *SizeTy = ConvertType(getContext().getSizeType());
+    const Type *ty = type.getTypePtr();
+    switch (ty->getTypeClass()) {
+#define TYPE(Class, Base)
+#define ABSTRACT_TYPE(Class, Base)
+#define NON_CANONICAL_TYPE(Class, Base) case Type::Class:
+#define DEPENDENT_TYPE(Class, Base) case Type::Class:
+#define NON_CANONICAL_UNLESS_DEPENDENT_TYPE(Class, Base) case Type::Class:
+#include "clang/AST/TypeNodes.def"
+      llvm_unreachable("unexpected dependent or non-canonical type!");
 
-      // Get the element size;
-      QualType ElemTy = VAT->getElementType();
-      llvm::Value *ElemSize;
-      if (ElemTy->isVariableArrayType())
-        ElemSize = EmitVLASize(ElemTy);
-      else
-        ElemSize = llvm::ConstantInt::get(SizeTy,
-            getContext().getTypeSizeInChars(ElemTy).getQuantity());
+    // These types are never variably-modified.
+    case Type::Builtin:
+    case Type::Complex:
+    case Type::Vector:
+    case Type::ExtVector:
+    case Type::Record:
+    case Type::Enum:
+    case Type::ObjCObject:
+    case Type::ObjCInterface:
+    case Type::ObjCObjectPointer:
+      llvm_unreachable("type class is never variably-modified!");
 
-      llvm::Value *NumElements = EmitScalarExpr(VAT->getSizeExpr());
-      NumElements = Builder.CreateIntCast(NumElements, SizeTy, false, "tmp");
+    case Type::Pointer:
+      type = cast<PointerType>(ty)->getPointeeType();
+      break;
 
-      SizeEntry = Builder.CreateMul(ElemSize, NumElements);
+    case Type::BlockPointer:
+      type = cast<BlockPointerType>(ty)->getPointeeType();
+      break;
+
+    case Type::LValueReference:
+    case Type::RValueReference:
+      type = cast<ReferenceType>(ty)->getPointeeType();
+      break;
+
+    case Type::MemberPointer:
+      type = cast<MemberPointerType>(ty)->getPointeeType();
+      break;
+
+    case Type::ConstantArray:
+    case Type::IncompleteArray:
+      // Losing element qualification here is fine.
+      type = cast<ArrayType>(ty)->getElementType();
+      break;
+
+    case Type::VariableArray: {
+      // Losing element qualification here is fine.
+      const VariableArrayType *vat = cast<VariableArrayType>(ty);
+
+      // Unknown size indication requires no size computation.
+      // Otherwise, evaluate and record it.
+      if (const Expr *size = vat->getSizeExpr()) {
+        // It's possible that we might have emitted this already,
+        // e.g. with a typedef and a pointer to it.
+        llvm::Value *&entry = VLASizeMap[size];
+        if (!entry) {
+          // Always zexting here would be wrong if it weren't
+          // undefined behavior to have a negative bound.
+          entry = Builder.CreateIntCast(EmitScalarExpr(size), SizeTy,
+                                        /*signed*/ false);
+        }
+      }
+      type = vat->getElementType();
+      break;
     }
 
-    return SizeEntry;
-  }
+    case Type::FunctionProto: 
+    case Type::FunctionNoProto:
+      type = cast<FunctionType>(ty)->getResultType();
+      break;
 
-  if (const ArrayType *AT = dyn_cast<ArrayType>(Ty)) {
-    EmitVLASize(AT->getElementType());
-    return 0;
-  }
-
-  if (const ParenType *PT = dyn_cast<ParenType>(Ty)) {
-    EmitVLASize(PT->getInnerType());
-    return 0;
-  }
-
-  const PointerType *PT = Ty->getAs<PointerType>();
-  assert(PT && "unknown VM type!");
-  EmitVLASize(PT->getPointeeType());
-  return 0;
+    case Type::Atomic:
+      type = cast<AtomicType>(ty)->getValueType();
+      break;
+    }
+  } while (type->isVariablyModifiedType());
 }
 
 llvm::Value* CodeGenFunction::EmitVAListRef(const Expr* E) {
@@ -872,4 +1049,51 @@ void CodeGenFunction::unprotectFromPeepholes(PeepholeProtection protection) {
 
   // In theory, we could try to duplicate the peepholes now, but whatever.
   protection.Inst->eraseFromParent();
+}
+
+llvm::Value *CodeGenFunction::EmitAnnotationCall(llvm::Value *AnnotationFn,
+                                                 llvm::Value *AnnotatedVal,
+                                                 llvm::StringRef AnnotationStr,
+                                                 SourceLocation Location) {
+  llvm::Value *Args[4] = {
+    AnnotatedVal,
+    Builder.CreateBitCast(CGM.EmitAnnotationString(AnnotationStr), Int8PtrTy),
+    Builder.CreateBitCast(CGM.EmitAnnotationUnit(Location), Int8PtrTy),
+    CGM.EmitAnnotationLineNo(Location)
+  };
+  return Builder.CreateCall(AnnotationFn, Args);
+}
+
+void CodeGenFunction::EmitVarAnnotations(const VarDecl *D, llvm::Value *V) {
+  assert(D->hasAttr<AnnotateAttr>() && "no annotate attribute");
+  // FIXME We create a new bitcast for every annotation because that's what
+  // llvm-gcc was doing.
+  for (specific_attr_iterator<AnnotateAttr>
+       ai = D->specific_attr_begin<AnnotateAttr>(),
+       ae = D->specific_attr_end<AnnotateAttr>(); ai != ae; ++ai)
+    EmitAnnotationCall(CGM.getIntrinsic(llvm::Intrinsic::var_annotation),
+                       Builder.CreateBitCast(V, CGM.Int8PtrTy, V->getName()),
+                       (*ai)->getAnnotation(), D->getLocation());
+}
+
+llvm::Value *CodeGenFunction::EmitFieldAnnotations(const FieldDecl *D,
+                                                   llvm::Value *V) {
+  assert(D->hasAttr<AnnotateAttr>() && "no annotate attribute");
+  llvm::Type *VTy = V->getType();
+  llvm::Value *F = CGM.getIntrinsic(llvm::Intrinsic::ptr_annotation,
+                                    CGM.Int8PtrTy);
+
+  for (specific_attr_iterator<AnnotateAttr>
+       ai = D->specific_attr_begin<AnnotateAttr>(),
+       ae = D->specific_attr_end<AnnotateAttr>(); ai != ae; ++ai) {
+    // FIXME Always emit the cast inst so we can differentiate between
+    // annotation on the first field of a struct and annotation on the struct
+    // itself.
+    if (VTy != CGM.Int8PtrTy)
+      V = Builder.Insert(new llvm::BitCastInst(V, CGM.Int8PtrTy));
+    V = EmitAnnotationCall(F, V, (*ai)->getAnnotation(), D->getLocation());
+    V = Builder.CreateBitCast(V, VTy);
+  }
+
+  return V;
 }

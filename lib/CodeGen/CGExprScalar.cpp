@@ -78,19 +78,19 @@ public:
     return I;
   }
 
-  const llvm::Type *ConvertType(QualType T) { return CGF.ConvertType(T); }
+  llvm::Type *ConvertType(QualType T) { return CGF.ConvertType(T); }
   LValue EmitLValue(const Expr *E) { return CGF.EmitLValue(E); }
   LValue EmitCheckedLValue(const Expr *E) { return CGF.EmitCheckedLValue(E); }
 
-  Value *EmitLoadOfLValue(LValue LV, QualType T) {
-    return CGF.EmitLoadOfLValue(LV, T).getScalarVal();
+  Value *EmitLoadOfLValue(LValue LV) {
+    return CGF.EmitLoadOfLValue(LV).getScalarVal();
   }
 
   /// EmitLoadOfLValue - Given an expression with complex type that represents a
   /// value l-value, this method emits the address of the l-value, then loads
   /// and returns the result.
   Value *EmitLoadOfLValue(const Expr *E) {
-    return EmitLoadOfLValue(EmitCheckedLValue(E), E->getType());
+    return EmitLoadOfLValue(EmitCheckedLValue(E));
   }
 
   /// EmitConversionToBool - Convert the specified expression value to a
@@ -153,13 +153,15 @@ public:
     
   Value *VisitStmt(Stmt *S) {
     S->dump(CGF.getContext().getSourceManager());
-    assert(0 && "Stmt can't have complex result type!");
-    return 0;
+    llvm_unreachable("Stmt can't have complex result type!");
   }
   Value *VisitExpr(Expr *S);
   
   Value *VisitParenExpr(ParenExpr *PE) {
     return Visit(PE->getSubExpr()); 
+  }
+  Value *VisitSubstNonTypeTemplateParmExpr(SubstNonTypeTemplateParmExpr *E) {
+    return Visit(E->getReplacement()); 
   }
   Value *VisitGenericSelectionExpr(GenericSelectionExpr *GE) {
     return Visit(GE->getResultExpr());
@@ -195,9 +197,13 @@ public:
     return llvm::ConstantInt::get(ConvertType(E->getType()),E->getPackLength());
   }
 
+  Value *VisitPseudoObjectExpr(PseudoObjectExpr *E) {
+    return CGF.EmitPseudoObjectRValue(E).getScalarVal();
+  }
+
   Value *VisitOpaqueValueExpr(OpaqueValueExpr *E) {
     if (E->isGLValue())
-      return EmitLoadOfLValue(CGF.getOpaqueLValueMapping(E), E->getType());
+      return EmitLoadOfLValue(CGF.getOpaqueLValueMapping(E));
 
     // Otherwise, assume the mapping is the scalar directly.
     return CGF.getOpaqueRValueMapping(E).getScalarVal();
@@ -206,7 +212,7 @@ public:
   // l-values.
   Value *VisitDeclRefExpr(DeclRefExpr *E) {
     Expr::EvalResult Result;
-    if (!E->Evaluate(Result, CGF.getContext()))
+    if (!E->EvaluateAsRValue(Result, CGF.getContext()))
       return EmitLoadOfLValue(E);
 
     assert(!Result.HasSideEffects && "Constant declref with side-effect?!");
@@ -238,11 +244,6 @@ public:
   Value *VisitObjCIvarRefExpr(ObjCIvarRefExpr *E) {
     return EmitLoadOfLValue(E);
   }
-  Value *VisitObjCPropertyRefExpr(ObjCPropertyRefExpr *E) {
-    assert(E->getObjectKind() == OK_Ordinary &&
-           "reached property reference without lvalue-to-rvalue");
-    return EmitLoadOfLValue(E);
-  }
   Value *VisitObjCMessageExpr(ObjCMessageExpr *E) {
     if (E->getMethodDecl() && 
         E->getMethodDecl()->getResultType()->isReferenceType())
@@ -252,7 +253,7 @@ public:
 
   Value *VisitObjCIsaExpr(ObjCIsaExpr *E) {
     LValue LV = CGF.EmitObjCIsaExpr(E);
-    Value *V = CGF.EmitLoadOfLValue(LV, E->getType()).getScalarVal();
+    Value *V = CGF.EmitLoadOfLValue(LV).getScalarVal();
     return V;
   }
 
@@ -269,14 +270,12 @@ public:
   Value *VisitImplicitValueInitExpr(const ImplicitValueInitExpr *E) {
     return CGF.CGM.EmitNullConstant(E->getType());
   }
-  Value *VisitCastExpr(CastExpr *E) {
-    // Make sure to evaluate VLA bounds now so that we have them for later.
+  Value *VisitExplicitCastExpr(ExplicitCastExpr *E) {
     if (E->getType()->isVariablyModifiedType())
-      CGF.EmitVLASize(E->getType());
-
-    return EmitCastExpr(E);
+      CGF.EmitVariablyModifiedType(E->getType());
+    return VisitCastExpr(E);
   }
-  Value *EmitCastExpr(CastExpr *E);
+  Value *VisitCastExpr(CastExpr *E);
 
   Value *VisitCallExpr(const CallExpr *E) {
     if (E->getCallReturnType()->isReferenceType())
@@ -342,6 +341,10 @@ public:
   }
     
   // C++
+  Value *VisitMaterializeTemporaryExpr(const MaterializeTemporaryExpr *E) {
+    return EmitLoadOfLValue(E);
+  }
+    
   Value *VisitCXXDefaultArgExpr(CXXDefaultArgExpr *DAE) {
     return Visit(DAE->getExpr());
   }
@@ -350,7 +353,9 @@ public:
   }
 
   Value *VisitExprWithCleanups(ExprWithCleanups *E) {
-    return CGF.EmitExprWithCleanups(E).getScalarVal();
+    CGF.enterFullExpression(E);
+    CodeGenFunction::RunCleanupsScope Scope(CGF);
+    return Visit(E->getSubExpr());
   }
   Value *VisitCXXNewExpr(const CXXNewExpr *E) {
     return CGF.EmitCXXNewExpr(E);
@@ -509,6 +514,7 @@ public:
     return CGF.EmitObjCStringLiteral(E);
   }
   Value *VisitAsTypeExpr(AsTypeExpr *CE);
+  Value *VisitAtomicExpr(AtomicExpr *AE);
 };
 }  // end anonymous namespace.
 
@@ -547,14 +553,24 @@ Value *ScalarExprEmitter::EmitScalarConversion(Value *Src, QualType SrcType,
 
   if (DstType->isVoidType()) return 0;
 
+  llvm::Type *SrcTy = Src->getType();
+
+  // Floating casts might be a bit special: if we're doing casts to / from half
+  // FP, we should go via special intrinsics.
+  if (SrcType->isHalfType()) {
+    Src = Builder.CreateCall(CGF.CGM.getIntrinsic(llvm::Intrinsic::convert_from_fp16), Src);
+    SrcType = CGF.getContext().FloatTy;
+    SrcTy = llvm::Type::getFloatTy(VMContext);
+  }
+
   // Handle conversions to bool first, they are special: comparisons against 0.
   if (DstType->isBooleanType())
     return EmitConversionToBool(Src, SrcType);
 
-  const llvm::Type *DstTy = ConvertType(DstType);
+  llvm::Type *DstTy = ConvertType(DstType);
 
   // Ignore conversions like int -> uint.
-  if (Src->getType() == DstTy)
+  if (SrcTy == DstTy)
     return Src;
 
   // Handle pointer conversions next: pointers can only be converted to/from
@@ -562,13 +578,13 @@ Value *ScalarExprEmitter::EmitScalarConversion(Value *Src, QualType SrcType,
   // some native types (like Obj-C id) may map to a pointer type.
   if (isa<llvm::PointerType>(DstTy)) {
     // The source value may be an integer, or a pointer.
-    if (isa<llvm::PointerType>(Src->getType()))
+    if (isa<llvm::PointerType>(SrcTy))
       return Builder.CreateBitCast(Src, DstTy, "conv");
 
     assert(SrcType->isIntegerType() && "Not ptr->ptr or int->ptr conversion?");
     // First, convert to the correct width so that we control the kind of
     // extension.
-    const llvm::Type *MiddleTy = CGF.IntPtrTy;
+    llvm::Type *MiddleTy = CGF.IntPtrTy;
     bool InputSigned = SrcType->isSignedIntegerOrEnumerationType();
     llvm::Value* IntResult =
         Builder.CreateIntCast(Src, MiddleTy, InputSigned, "conv");
@@ -576,7 +592,7 @@ Value *ScalarExprEmitter::EmitScalarConversion(Value *Src, QualType SrcType,
     return Builder.CreateIntToPtr(IntResult, DstTy, "conv");
   }
 
-  if (isa<llvm::PointerType>(Src->getType())) {
+  if (isa<llvm::PointerType>(SrcTy)) {
     // Must be an ptr to int cast.
     assert(isa<llvm::IntegerType>(DstTy) && "not ptr->int?");
     return Builder.CreatePtrToInt(Src, DstTy, "conv");
@@ -591,10 +607,10 @@ Value *ScalarExprEmitter::EmitScalarConversion(Value *Src, QualType SrcType,
     // Insert the element in element zero of an undef vector
     llvm::Value *UnV = llvm::UndefValue::get(DstTy);
     llvm::Value *Idx = Builder.getInt32(0);
-    UnV = Builder.CreateInsertElement(UnV, Elt, Idx, "tmp");
+    UnV = Builder.CreateInsertElement(UnV, Elt, Idx);
 
     // Splat the element across to all elements
-    llvm::SmallVector<llvm::Constant*, 16> Args;
+    SmallVector<llvm::Constant*, 16> Args;
     unsigned NumElements = cast<llvm::VectorType>(DstTy)->getNumElements();
     for (unsigned i = 0; i != NumElements; ++i)
       Args.push_back(Builder.getInt32(0));
@@ -605,34 +621,47 @@ Value *ScalarExprEmitter::EmitScalarConversion(Value *Src, QualType SrcType,
   }
 
   // Allow bitcast from vector to integer/fp of the same size.
-  if (isa<llvm::VectorType>(Src->getType()) ||
+  if (isa<llvm::VectorType>(SrcTy) ||
       isa<llvm::VectorType>(DstTy))
     return Builder.CreateBitCast(Src, DstTy, "conv");
 
   // Finally, we have the arithmetic types: real int/float.
-  if (isa<llvm::IntegerType>(Src->getType())) {
+  Value *Res = NULL;
+  llvm::Type *ResTy = DstTy;
+
+  // Cast to half via float
+  if (DstType->isHalfType())
+    DstTy = llvm::Type::getFloatTy(VMContext);
+
+  if (isa<llvm::IntegerType>(SrcTy)) {
     bool InputSigned = SrcType->isSignedIntegerOrEnumerationType();
     if (isa<llvm::IntegerType>(DstTy))
-      return Builder.CreateIntCast(Src, DstTy, InputSigned, "conv");
+      Res = Builder.CreateIntCast(Src, DstTy, InputSigned, "conv");
     else if (InputSigned)
-      return Builder.CreateSIToFP(Src, DstTy, "conv");
+      Res = Builder.CreateSIToFP(Src, DstTy, "conv");
     else
-      return Builder.CreateUIToFP(Src, DstTy, "conv");
-  }
-
-  assert(Src->getType()->isFloatingPointTy() && "Unknown real conversion");
-  if (isa<llvm::IntegerType>(DstTy)) {
+      Res = Builder.CreateUIToFP(Src, DstTy, "conv");
+  } else if (isa<llvm::IntegerType>(DstTy)) {
+    assert(SrcTy->isFloatingPointTy() && "Unknown real conversion");
     if (DstType->isSignedIntegerOrEnumerationType())
-      return Builder.CreateFPToSI(Src, DstTy, "conv");
+      Res = Builder.CreateFPToSI(Src, DstTy, "conv");
     else
-      return Builder.CreateFPToUI(Src, DstTy, "conv");
+      Res = Builder.CreateFPToUI(Src, DstTy, "conv");
+  } else {
+    assert(SrcTy->isFloatingPointTy() && DstTy->isFloatingPointTy() &&
+           "Unknown real conversion");
+    if (DstTy->getTypeID() < SrcTy->getTypeID())
+      Res = Builder.CreateFPTrunc(Src, DstTy, "conv");
+    else
+      Res = Builder.CreateFPExt(Src, DstTy, "conv");
   }
 
-  assert(DstTy->isFloatingPointTy() && "Unknown real conversion");
-  if (DstTy->getTypeID() < Src->getType()->getTypeID())
-    return Builder.CreateFPTrunc(Src, DstTy, "conv");
-  else
-    return Builder.CreateFPExt(Src, DstTy, "conv");
+  if (DstTy != ResTy) {
+    assert(ResTy->isIntegerTy(16) && "Only half FP requires extra conversion");
+    Res = Builder.CreateCall(CGF.CGM.getIntrinsic(llvm::Intrinsic::convert_to_fp16), Res);
+  }
+
+  return Res;
 }
 
 /// EmitComplexToScalarConversion - Emit a conversion from the specified complex
@@ -685,14 +714,14 @@ Value *ScalarExprEmitter::VisitShuffleVectorExpr(ShuffleVectorExpr *E) {
     Value *RHS = CGF.EmitScalarExpr(E->getExpr(1));
     Value *Mask;
     
-    const llvm::VectorType *LTy = cast<llvm::VectorType>(LHS->getType());
+    llvm::VectorType *LTy = cast<llvm::VectorType>(LHS->getType());
     unsigned LHSElts = LTy->getNumElements();
 
     if (E->getNumSubExprs() == 3) {
       Mask = CGF.EmitScalarExpr(E->getExpr(2));
       
       // Shuffle LHS & RHS into one input vector.
-      llvm::SmallVector<llvm::Constant*, 32> concat;
+      SmallVector<llvm::Constant*, 32> concat;
       for (unsigned i = 0; i != LHSElts; ++i) {
         concat.push_back(Builder.getInt32(2*i));
         concat.push_back(Builder.getInt32(2*i+1));
@@ -705,7 +734,7 @@ Value *ScalarExprEmitter::VisitShuffleVectorExpr(ShuffleVectorExpr *E) {
       Mask = RHS;
     }
     
-    const llvm::VectorType *MTy = cast<llvm::VectorType>(Mask->getType());
+    llvm::VectorType *MTy = cast<llvm::VectorType>(Mask->getType());
     llvm::Constant* EltMask;
     
     // Treat vec3 like vec4.
@@ -720,7 +749,7 @@ Value *ScalarExprEmitter::VisitShuffleVectorExpr(ShuffleVectorExpr *E) {
                                        (1 << llvm::Log2_32(LHSElts))-1);
              
     // Mask off the high bits of each shuffle index.
-    llvm::SmallVector<llvm::Constant *, 32> MaskV;
+    SmallVector<llvm::Constant *, 32> MaskV;
     for (unsigned i = 0, e = MTy->getNumElements(); i != e; ++i)
       MaskV.push_back(EltMask);
     
@@ -733,7 +762,7 @@ Value *ScalarExprEmitter::VisitShuffleVectorExpr(ShuffleVectorExpr *E) {
     //   n = extract mask i
     //   x = extract val n
     //   newv = insert newv, x, i
-    const llvm::VectorType *RTy = llvm::VectorType::get(LTy->getElementType(),
+    llvm::VectorType *RTy = llvm::VectorType::get(LTy->getElementType(),
                                                         MTy->getNumElements());
     Value* NewV = llvm::UndefValue::get(RTy);
     for (unsigned i = 0, e = MTy->getNumElements(); i != e; ++i) {
@@ -759,8 +788,8 @@ Value *ScalarExprEmitter::VisitShuffleVectorExpr(ShuffleVectorExpr *E) {
   Value* V2 = CGF.EmitScalarExpr(E->getExpr(1));
   
   // Handle vec3 special since the index will be off by one for the RHS.
-  const llvm::VectorType *VTy = cast<llvm::VectorType>(V1->getType());
-  llvm::SmallVector<llvm::Constant*, 32> indices;
+  llvm::VectorType *VTy = cast<llvm::VectorType>(V1->getType());
+  SmallVector<llvm::Constant*, 32> indices;
   for (unsigned i = 2; i < E->getNumSubExprs(); i++) {
     unsigned Idx = E->getShuffleMaskIdx(CGF.getContext(), i-2);
     if (VTy->getNumElements() == 3 && Idx > 3)
@@ -772,13 +801,13 @@ Value *ScalarExprEmitter::VisitShuffleVectorExpr(ShuffleVectorExpr *E) {
   return Builder.CreateShuffleVector(V1, V2, SV, "shuffle");
 }
 Value *ScalarExprEmitter::VisitMemberExpr(MemberExpr *E) {
-  Expr::EvalResult Result;
-  if (E->Evaluate(Result, CGF.getContext()) && Result.Val.isInt()) {
+  llvm::APSInt Value;
+  if (E->EvaluateAsInt(Value, CGF.getContext(), Expr::SE_AllowSideEffects)) {
     if (E->isArrow())
       CGF.EmitScalarExpr(E->getBase());
     else
       EmitLValue(E->getBase());
-    return Builder.getInt(Result.Val.getInt());
+    return Builder.getInt(Value);
   }
 
   // Emit debug info for aggregate now, if it was delayed to reduce 
@@ -814,7 +843,7 @@ Value *ScalarExprEmitter::VisitArraySubscriptExpr(ArraySubscriptExpr *E) {
 }
 
 static llvm::Constant *getMaskElt(llvm::ShuffleVectorInst *SVI, unsigned Idx,
-                                  unsigned Off, const llvm::Type *I32Ty) {
+                                  unsigned Off, llvm::Type *I32Ty) {
   int MV = SVI->getMaskValue(Idx);
   if (MV == -1) 
     return llvm::UndefValue::get(I32Ty);
@@ -830,12 +859,17 @@ Value *ScalarExprEmitter::VisitInitListExpr(InitListExpr *E) {
   if (E->hadArrayRangeDesignator())
     CGF.ErrorUnsupported(E, "GNU array range designator extension");
   
-  const llvm::VectorType *VType =
+  llvm::VectorType *VType =
     dyn_cast<llvm::VectorType>(ConvertType(E->getType()));
   
-  // We have a scalar in braces. Just use the first element.
-  if (!VType)
+  if (!VType) {
+    if (NumInitElements == 0) {
+      // C++11 value-initialization for the scalar.
+      return EmitNullValue(E->getType());
+    }
+    // We have a scalar in braces. Just use the first element.
     return Visit(E->getInit(0));
+  }
   
   unsigned ResElts = VType->getNumElements();
   
@@ -850,9 +884,9 @@ Value *ScalarExprEmitter::VisitInitListExpr(InitListExpr *E) {
   for (unsigned i = 0; i != NumInitElements; ++i) {
     Expr *IE = E->getInit(i);
     Value *Init = Visit(IE);
-    llvm::SmallVector<llvm::Constant*, 16> Args;
+    SmallVector<llvm::Constant*, 16> Args;
     
-    const llvm::VectorType *VVT = dyn_cast<llvm::VectorType>(Init->getType());
+    llvm::VectorType *VVT = dyn_cast<llvm::VectorType>(Init->getType());
     
     // Handle scalar elements.  If the scalar initializer is actually one
     // element of a different vector of the same width, use shuffle instead of 
@@ -910,7 +944,7 @@ Value *ScalarExprEmitter::VisitInitListExpr(InitListExpr *E) {
     if (isa<ExtVectorElementExpr>(IE)) {
       llvm::ShuffleVectorInst *SVI = cast<llvm::ShuffleVectorInst>(Init);
       Value *SVOp = SVI->getOperand(0);
-      const llvm::VectorType *OpTy = cast<llvm::VectorType>(SVOp->getType());
+      llvm::VectorType *OpTy = cast<llvm::VectorType>(SVOp->getType());
       
       if (OpTy->getNumElements() == ResElts) {
         for (unsigned j = 0; j != CurIdx; ++j) {
@@ -967,7 +1001,7 @@ Value *ScalarExprEmitter::VisitInitListExpr(InitListExpr *E) {
   
   // FIXME: evaluate codegen vs. shuffling against constant null vector.
   // Emit remaining default initializers.
-  const llvm::Type *EltTy = VType->getElementType();
+  llvm::Type *EltTy = VType->getElementType();
   
   // Emit remaining default initializers
   for (/* Do not initialize i*/; CurIdx < ResElts; ++CurIdx) {
@@ -1001,7 +1035,7 @@ static bool ShouldNullCheckClassCastValue(const CastExpr *CE) {
 // VisitCastExpr - Emit code for an explicit or implicit cast.  Implicit casts
 // have to handle a more broad range of conversions than explicit casts, as they
 // handle things like function to ptr-to-function decay etc.
-Value *ScalarExprEmitter::EmitCastExpr(CastExpr *CE) {
+Value *ScalarExprEmitter::VisitCastExpr(CastExpr *CE) {
   Expr *E = CE->getSubExpr();
   QualType DestTy = CE->getType();
   CastKind Kind = CE->getCastKind();
@@ -1020,10 +1054,11 @@ Value *ScalarExprEmitter::EmitCastExpr(CastExpr *CE) {
     Value *V = EmitLValue(E).getAddress();
     V = Builder.CreateBitCast(V, 
                           ConvertType(CGF.getContext().getPointerType(DestTy)));
-    return EmitLoadOfLValue(CGF.MakeAddrLValue(V, DestTy), DestTy);
+    return EmitLoadOfLValue(CGF.MakeNaturalAlignAddrLValue(V, DestTy));
   }
-      
-  case CK_AnyPointerToObjCPointerCast:
+
+  case CK_CPointerToObjCPointerCast:
+  case CK_BlockPointerToObjCPointerCast:
   case CK_AnyPointerToBlockPointerCast:
   case CK_BitCast: {
     Value *Src = Visit(const_cast<Expr*>(E));
@@ -1074,7 +1109,9 @@ Value *ScalarExprEmitter::EmitCastExpr(CastExpr *CE) {
       V = Builder.CreateStructGEP(V, 0, "arraydecay");
     }
 
-    return V;
+    // Make sure the array decay ends up being the right type.  This matters if
+    // the array type was of an incomplete type.
+    return CGF.Builder.CreateBitCast(V, ConvertType(CE->getType()));
   }
   case CK_FunctionToPointerDecay:
     return EmitLValue(E).getAddress();
@@ -1107,10 +1144,17 @@ Value *ScalarExprEmitter::EmitCastExpr(CastExpr *CE) {
     return CGF.CGM.getCXXABI().EmitMemberPointerConversion(CGF, CE, Src);
   }
 
-  case CK_ObjCProduceObject:
+  case CK_ARCProduceObject:
     return CGF.EmitARCRetainScalarExpr(E);
-  case CK_ObjCConsumeObject:
+  case CK_ARCConsumeObject:
     return CGF.EmitObjCConsumeObject(E->getType(), Visit(E));
+  case CK_ARCReclaimReturnedObject: {
+    llvm::Value *value = Visit(E);
+    value = CGF.EmitARCRetainAutoreleasedReturnValue(value);
+    return CGF.EmitObjCConsumeObject(E->getType(), value);
+  }
+  case CK_ARCExtendBlockObject:
+    return CGF.EmitARCExtendBlockObject(E);
 
   case CK_FloatingRealToComplex:
   case CK_FloatingComplexCast:
@@ -1123,14 +1167,6 @@ Value *ScalarExprEmitter::EmitCastExpr(CastExpr *CE) {
     llvm_unreachable("scalar cast to non-scalar value");
     break;
 
-  case CK_GetObjCProperty: {
-    assert(CGF.getContext().hasSameUnqualifiedType(E->getType(), DestTy));
-    assert(E->isGLValue() && E->getObjectKind() == OK_ObjCProperty &&
-           "CK_GetObjCProperty for non-lvalue or non-ObjCProperty");
-    RValue RV = CGF.EmitLoadOfLValue(CGF.EmitLValue(E), E->getType());
-    return RV.getScalarVal();
-  }
-
   case CK_LValueToRValue:
     assert(CGF.getContext().hasSameUnqualifiedType(E->getType(), DestTy));
     assert(E->isGLValue() && "lvalue-to-rvalue applied to r-value!");
@@ -1141,37 +1177,32 @@ Value *ScalarExprEmitter::EmitCastExpr(CastExpr *CE) {
 
     // First, convert to the correct width so that we control the kind of
     // extension.
-    const llvm::Type *MiddleTy = CGF.IntPtrTy;
+    llvm::Type *MiddleTy = CGF.IntPtrTy;
     bool InputSigned = E->getType()->isSignedIntegerOrEnumerationType();
     llvm::Value* IntResult =
       Builder.CreateIntCast(Src, MiddleTy, InputSigned, "conv");
 
     return Builder.CreateIntToPtr(IntResult, ConvertType(DestTy));
   }
-  case CK_PointerToIntegral: {
-    Value *Src = Visit(const_cast<Expr*>(E));
+  case CK_PointerToIntegral:
+    assert(!DestTy->isBooleanType() && "bool should use PointerToBool");
+    return Builder.CreatePtrToInt(Visit(E), ConvertType(DestTy));
 
-    // Handle conversion to bool correctly.
-    if (DestTy->isBooleanType())
-      return EmitScalarConversion(Src, E->getType(), DestTy);
-
-    return Builder.CreatePtrToInt(Src, ConvertType(DestTy));
-  }
   case CK_ToVoid: {
     CGF.EmitIgnoredExpr(E);
     return 0;
   }
   case CK_VectorSplat: {
-    const llvm::Type *DstTy = ConvertType(DestTy);
+    llvm::Type *DstTy = ConvertType(DestTy);
     Value *Elt = Visit(const_cast<Expr*>(E));
 
     // Insert the element in element zero of an undef vector
     llvm::Value *UnV = llvm::UndefValue::get(DstTy);
     llvm::Value *Idx = Builder.getInt32(0);
-    UnV = Builder.CreateInsertElement(UnV, Elt, Idx, "tmp");
+    UnV = Builder.CreateInsertElement(UnV, Elt, Idx);
 
     // Splat the element across to all elements
-    llvm::SmallVector<llvm::Constant*, 16> Args;
+    SmallVector<llvm::Constant*, 16> Args;
     unsigned NumElements = cast<llvm::VectorType>(DstTy)->getNumElements();
     llvm::Constant *Zero = Builder.getInt32(0);
     for (unsigned i = 0; i < NumElements; i++)
@@ -1187,7 +1218,6 @@ Value *ScalarExprEmitter::EmitCastExpr(CastExpr *CE) {
   case CK_FloatingToIntegral:
   case CK_FloatingCast:
     return EmitScalarConversion(Visit(E), E->getType(), DestTy);
-
   case CK_IntegralToBoolean:
     return EmitIntToBoolConversion(Visit(E));
   case CK_PointerToBoolean:
@@ -1226,7 +1256,7 @@ Value *ScalarExprEmitter::VisitStmtExpr(const StmtExpr *E) {
 
 Value *ScalarExprEmitter::VisitBlockDeclRefExpr(const BlockDeclRefExpr *E) {
   LValue LV = CGF.EmitBlockDeclRefLValue(E);
-  return CGF.EmitLoadOfLValue(LV, E->getType()).getScalarVal();
+  return CGF.EmitLoadOfLValue(LV).getScalarVal();
 }
 
 //===----------------------------------------------------------------------===//
@@ -1252,10 +1282,8 @@ EmitAddConsiderOverflowBehavior(const UnaryOperator *E,
     BinOp.Opcode = BO_Add;
     BinOp.E = E;
     return EmitOverflowCheckedBinOp(BinOp);
-    break;
   }
-  assert(false && "Unknown SignedOverflowBehaviorTy");
-  return 0;
+  llvm_unreachable("Unknown SignedOverflowBehaviorTy");
 }
 
 llvm::Value *
@@ -1263,7 +1291,7 @@ ScalarExprEmitter::EmitScalarPrePostIncDec(const UnaryOperator *E, LValue LV,
                                            bool isInc, bool isPre) {
   
   QualType type = E->getSubExpr()->getType();
-  llvm::Value *value = EmitLoadOfLValue(LV, type);
+  llvm::Value *value = EmitLoadOfLValue(LV);
   llvm::Value *input = value;
 
   int amount = (isInc ? 1 : -1);
@@ -1287,7 +1315,7 @@ ScalarExprEmitter::EmitScalarPrePostIncDec(const UnaryOperator *E, LValue LV,
     // overflow because of promotion rules; we're just eliding a few steps here.
     if (type->isSignedIntegerOrEnumerationType() &&
         value->getType()->getPrimitiveSizeInBits() >=
-            CGF.CGM.IntTy->getBitWidth())
+            CGF.IntTy->getBitWidth())
       value = EmitAddConsiderOverflowBehavior(E, value, amt, isInc);
     else
       value = Builder.CreateAdd(value, amt, isInc ? "inc" : "dec");
@@ -1297,16 +1325,14 @@ ScalarExprEmitter::EmitScalarPrePostIncDec(const UnaryOperator *E, LValue LV,
     QualType type = ptr->getPointeeType();
 
     // VLA types don't have constant size.
-    if (type->isVariableArrayType()) {
-      llvm::Value *vlaSize =
-        CGF.GetVLASize(CGF.getContext().getAsVariableArrayType(type));
-      value = CGF.EmitCastToVoidPtr(value);
-      if (!isInc) vlaSize = Builder.CreateNSWNeg(vlaSize, "vla.negsize");
+    if (const VariableArrayType *vla
+          = CGF.getContext().getAsVariableArrayType(type)) {
+      llvm::Value *numElts = CGF.getVLASize(vla).first;
+      if (!isInc) numElts = Builder.CreateNSWNeg(numElts, "vla.negsize");
       if (CGF.getContext().getLangOptions().isSignedOverflowDefined())
-        value = Builder.CreateGEP(value, vlaSize, "vla.inc");
+        value = Builder.CreateGEP(value, numElts, "vla.inc");
       else
-        value = Builder.CreateInBoundsGEP(value, vlaSize, "vla.inc");
-      value = Builder.CreateBitCast(value, input->getType());
+        value = Builder.CreateInBoundsGEP(value, numElts, "vla.inc");
     
     // Arithmetic on function pointers (!) is just +-1.
     } else if (type->isFunctionType()) {
@@ -1345,6 +1371,14 @@ ScalarExprEmitter::EmitScalarPrePostIncDec(const UnaryOperator *E, LValue LV,
   } else if (type->isRealFloatingType()) {
     // Add the inc/dec to the real part.
     llvm::Value *amt;
+
+    if (type->isHalfType()) {
+      // Another special case: half FP increment should be done via float
+      value =
+    Builder.CreateCall(CGF.CGM.getIntrinsic(llvm::Intrinsic::convert_from_fp16),
+                       input);
+    }
+
     if (value->getType()->isFloatTy())
       amt = llvm::ConstantFP::get(VMContext,
                                   llvm::APFloat(static_cast<float>(amount)));
@@ -1359,6 +1393,11 @@ ScalarExprEmitter::EmitScalarPrePostIncDec(const UnaryOperator *E, LValue LV,
       amt = llvm::ConstantFP::get(VMContext, F);
     }
     value = Builder.CreateFAdd(value, amt, isInc ? "inc" : "dec");
+
+    if (type->isHalfType())
+      value =
+       Builder.CreateCall(CGF.CGM.getIntrinsic(llvm::Intrinsic::convert_to_fp16),
+                          value);
 
   // Objective-C pointer types.
   } else {
@@ -1376,13 +1415,13 @@ ScalarExprEmitter::EmitScalarPrePostIncDec(const UnaryOperator *E, LValue LV,
       value = Builder.CreateInBoundsGEP(value, sizeValue, "incdec.objptr");
     value = Builder.CreateBitCast(value, input->getType());
   }
-  
+
   // Store the updated result through the lvalue.
   if (LV.isBitField())
-    CGF.EmitStoreThroughBitfieldLValue(RValue::get(value), LV, type, &value);
+    CGF.EmitStoreThroughBitfieldLValue(RValue::get(value), LV, &value);
   else
-    CGF.EmitStoreThroughLValue(RValue::get(value), LV, type);
-  
+    CGF.EmitStoreThroughLValue(RValue::get(value), LV);
+
   // If this is a postinc, return the value read from memory, otherwise use the
   // updated value.
   return isPre ? value : input;
@@ -1427,13 +1466,13 @@ Value *ScalarExprEmitter::VisitUnaryLNot(const UnaryOperator *E) {
 
 Value *ScalarExprEmitter::VisitOffsetOfExpr(OffsetOfExpr *E) {
   // Try folding the offsetof to a constant.
-  Expr::EvalResult EvalResult;
-  if (E->Evaluate(EvalResult, CGF.getContext()))
-    return Builder.getInt(EvalResult.Val.getInt());
+  llvm::APSInt Value;
+  if (E->EvaluateAsInt(Value, CGF.getContext()))
+    return Builder.getInt(Value);
 
   // Loop over the components of the offsetof to compute the value.
   unsigned n = E->getNumComponents();
-  const llvm::Type* ResultType = ConvertType(E->getType());
+  llvm::Type* ResultType = ConvertType(E->getType());
   llvm::Value* Result = llvm::Constant::getNullValue(ResultType);
   QualType CurrentType = E->getTypeSourceInfo()->getType();
   for (unsigned i = 0; i != n; ++i) {
@@ -1526,22 +1565,31 @@ ScalarExprEmitter::VisitUnaryExprOrTypeTraitExpr(
           CGF.getContext().getAsVariableArrayType(TypeToSize)) {
       if (E->isArgumentType()) {
         // sizeof(type) - make sure to emit the VLA size.
-        CGF.EmitVLASize(TypeToSize);
+        CGF.EmitVariablyModifiedType(TypeToSize);
       } else {
         // C99 6.5.3.4p2: If the argument is an expression of type
         // VLA, it is evaluated.
         CGF.EmitIgnoredExpr(E->getArgumentExpr());
       }
 
-      return CGF.GetVLASize(VAT);
+      QualType eltType;
+      llvm::Value *numElts;
+      llvm::tie(numElts, eltType) = CGF.getVLASize(VAT);
+
+      llvm::Value *size = numElts;
+
+      // Scale the number of non-VLA elements by the non-VLA element size.
+      CharUnits eltSize = CGF.getContext().getTypeSizeInChars(eltType);
+      if (!eltSize.isOne())
+        size = CGF.Builder.CreateNUWMul(CGF.CGM.getSize(eltSize), numElts);
+
+      return size;
     }
   }
 
   // If this isn't sizeof(vla), the result must be constant; use the constant
   // folding logic so we don't have to duplicate it here.
-  Expr::EvalResult Result;
-  E->Evaluate(Result, CGF.getContext());
-  return Builder.getInt(Result.Val.getInt());
+  return Builder.getInt(E->EvaluateKnownConstInt(CGF.getContext()));
 }
 
 Value *ScalarExprEmitter::VisitUnaryReal(const UnaryOperator *E) {
@@ -1551,8 +1599,7 @@ Value *ScalarExprEmitter::VisitUnaryReal(const UnaryOperator *E) {
     // Note that we have to ask E because Op might be an l-value that
     // this won't work for, e.g. an Obj-C property.
     if (E->isGLValue())
-      return CGF.EmitLoadOfLValue(CGF.EmitLValue(E), E->getType())
-                .getScalarVal();
+      return CGF.EmitLoadOfLValue(CGF.EmitLValue(E)).getScalarVal();
 
     // Otherwise, calculate and project.
     return CGF.EmitComplexExpr(Op, false, true).first;
@@ -1568,8 +1615,7 @@ Value *ScalarExprEmitter::VisitUnaryImag(const UnaryOperator *E) {
     // Note that we have to ask E because Op might be an l-value that
     // this won't work for, e.g. an Obj-C property.
     if (Op->isGLValue())
-      return CGF.EmitLoadOfLValue(CGF.EmitLValue(E), E->getType())
-                .getScalarVal();
+      return CGF.EmitLoadOfLValue(CGF.EmitLValue(E)).getScalarVal();
 
     // Otherwise, calculate and project.
     return CGF.EmitComplexExpr(Op, true, false).second;
@@ -1621,7 +1667,7 @@ LValue ScalarExprEmitter::EmitCompoundAssignLValue(
   OpInfo.E = E;
   // Load/convert the LHS.
   LValue LHSLV = EmitCheckedLValue(E->getLHS());
-  OpInfo.LHS = EmitLoadOfLValue(LHSLV, LHSTy);
+  OpInfo.LHS = EmitLoadOfLValue(LHSLV);
   OpInfo.LHS = EmitScalarConversion(OpInfo.LHS, LHSTy,
                                     E->getComputationLHSType());
   
@@ -1636,10 +1682,9 @@ LValue ScalarExprEmitter::EmitCompoundAssignLValue(
   // 'An assignment expression has the value of the left operand after the
   // assignment...'.
   if (LHSLV.isBitField())
-    CGF.EmitStoreThroughBitfieldLValue(RValue::get(Result), LHSLV, LHSTy,
-                                       &Result);
+    CGF.EmitStoreThroughBitfieldLValue(RValue::get(Result), LHSLV, &Result);
   else
-    CGF.EmitStoreThroughLValue(RValue::get(Result), LHSLV, LHSTy);
+    CGF.EmitStoreThroughLValue(RValue::get(Result), LHSLV);
 
   return LHSLV;
 }
@@ -1658,26 +1703,24 @@ Value *ScalarExprEmitter::EmitCompoundAssign(const CompoundAssignOperator *E,
   if (!CGF.getContext().getLangOptions().CPlusPlus)
     return RHS;
 
-  // Objective-C property assignment never reloads the value following a store.
-  if (LHS.isPropertyRef())
-    return RHS;
-
   // If the lvalue is non-volatile, return the computed value of the assignment.
   if (!LHS.isVolatileQualified())
     return RHS;
 
   // Otherwise, reload the value.
-  return EmitLoadOfLValue(LHS, E->getType());
+  return EmitLoadOfLValue(LHS);
 }
 
 void ScalarExprEmitter::EmitUndefinedBehaviorIntegerDivAndRemCheck(
      					    const BinOpInfo &Ops, 
 				     	    llvm::Value *Zero, bool isDiv) {
-  llvm::BasicBlock *overflowBB = CGF.createBasicBlock("overflow", CGF.CurFn);
+  llvm::Function::iterator insertPt = Builder.GetInsertBlock();
   llvm::BasicBlock *contBB =
-    CGF.createBasicBlock(isDiv ? "div.cont" : "rem.cont", CGF.CurFn);
+    CGF.createBasicBlock(isDiv ? "div.cont" : "rem.cont", CGF.CurFn,
+                         llvm::next(insertPt));
+  llvm::BasicBlock *overflowBB = CGF.createBasicBlock("overflow", CGF.CurFn);
 
-  const llvm::IntegerType *Ty = cast<llvm::IntegerType>(Zero->getType());
+  llvm::IntegerType *Ty = cast<llvm::IntegerType>(Zero->getType());
 
   if (Ops.Ty->hasSignedIntegerRepresentation()) {
     llvm::Value *IntMin =
@@ -1705,17 +1748,29 @@ Value *ScalarExprEmitter::EmitDiv(const BinOpInfo &Ops) {
     if (Ops.Ty->isIntegerType())
       EmitUndefinedBehaviorIntegerDivAndRemCheck(Ops, Zero, true);
     else if (Ops.Ty->isRealFloatingType()) {
+      llvm::Function::iterator insertPt = Builder.GetInsertBlock();
+      llvm::BasicBlock *DivCont = CGF.createBasicBlock("div.cont", CGF.CurFn,
+                                                       llvm::next(insertPt));
       llvm::BasicBlock *overflowBB = CGF.createBasicBlock("overflow",
                                                           CGF.CurFn);
-      llvm::BasicBlock *DivCont = CGF.createBasicBlock("div.cont", CGF.CurFn);
       CGF.Builder.CreateCondBr(Builder.CreateFCmpOEQ(Ops.RHS, Zero), 
                                overflowBB, DivCont);
       EmitOverflowBB(overflowBB);
       Builder.SetInsertPoint(DivCont);
     }
   }
-  if (Ops.LHS->getType()->isFPOrFPVectorTy())
-    return Builder.CreateFDiv(Ops.LHS, Ops.RHS, "div");
+  if (Ops.LHS->getType()->isFPOrFPVectorTy()) {
+    llvm::Value *Val = Builder.CreateFDiv(Ops.LHS, Ops.RHS, "div");
+    if (CGF.getContext().getLangOptions().OpenCL) {
+      // OpenCL 1.1 7.4: minimum accuracy of single precision / is 2.5ulp
+      llvm::Type *ValTy = Val->getType();
+      if (ValTy->isFloatTy() ||
+          (isa<llvm::VectorType>(ValTy) &&
+           cast<llvm::VectorType>(ValTy)->getElementType()->isFloatTy()))
+        CGF.SetFPAccuracy(Val, 5, 2);
+    }
+    return Val;
+  }
   else if (Ops.Ty->hasUnsignedIntegerRepresentation())
     return Builder.CreateUDiv(Ops.LHS, Ops.RHS, "div");
   else
@@ -1758,15 +1813,15 @@ Value *ScalarExprEmitter::EmitOverflowCheckedBinOp(const BinOpInfo &Ops) {
     IID = llvm::Intrinsic::smul_with_overflow;
     break;
   default:
-    assert(false && "Unsupported operation for overflow detection");
+    llvm_unreachable("Unsupported operation for overflow detection");
     IID = 0;
   }
   OpID <<= 1;
   OpID |= 1;
 
-  const llvm::Type *opTy = CGF.CGM.getTypes().ConvertType(Ops.Ty);
+  llvm::Type *opTy = CGF.CGM.getTypes().ConvertType(Ops.Ty);
 
-  llvm::Function *intrinsic = CGF.CGM.getIntrinsic(IID, &opTy, 1);
+  llvm::Function *intrinsic = CGF.CGM.getIntrinsic(IID, opTy);
 
   Value *resultAndOverflow = Builder.CreateCall2(intrinsic, Ops.LHS, Ops.RHS);
   Value *result = Builder.CreateExtractValue(resultAndOverflow, 0);
@@ -1774,8 +1829,10 @@ Value *ScalarExprEmitter::EmitOverflowCheckedBinOp(const BinOpInfo &Ops) {
 
   // Branch in case of overflow.
   llvm::BasicBlock *initialBB = Builder.GetInsertBlock();
+  llvm::Function::iterator insertPt = initialBB;
+  llvm::BasicBlock *continueBB = CGF.createBasicBlock("nooverflow", CGF.CurFn,
+                                                      llvm::next(insertPt));
   llvm::BasicBlock *overflowBB = CGF.createBasicBlock("overflow", CGF.CurFn);
-  llvm::BasicBlock *continueBB = CGF.createBasicBlock("nooverflow", CGF.CurFn);
 
   Builder.CreateCondBr(overflow, overflowBB, continueBB);
 
@@ -1793,8 +1850,8 @@ Value *ScalarExprEmitter::EmitOverflowCheckedBinOp(const BinOpInfo &Ops) {
   Builder.SetInsertPoint(overflowBB);
 
   // Get the overflow handler.
-  const llvm::Type *Int8Ty = llvm::Type::getInt8Ty(VMContext);
-  const llvm::Type *argTypes[] = { CGF.Int64Ty, CGF.Int64Ty, Int8Ty, Int8Ty };
+  llvm::Type *Int8Ty = llvm::Type::getInt8Ty(VMContext);
+  llvm::Type *argTypes[] = { CGF.Int64Ty, CGF.Int64Ty, Int8Ty, Int8Ty };
   llvm::FunctionType *handlerTy =
       llvm::FunctionType::get(CGF.Int64Ty, argTypes, true);
   llvm::Value *handler = CGF.CGM.CreateRuntimeFunction(handlerTy, *handlerName);
@@ -1822,196 +1879,187 @@ Value *ScalarExprEmitter::EmitOverflowCheckedBinOp(const BinOpInfo &Ops) {
   return phi;
 }
 
-Value *ScalarExprEmitter::EmitAdd(const BinOpInfo &Ops) {
-  if (!Ops.Ty->isAnyPointerType()) {
-    if (Ops.Ty->isSignedIntegerOrEnumerationType()) {
-      switch (CGF.getContext().getLangOptions().getSignedOverflowBehavior()) {
-      case LangOptions::SOB_Undefined:
-        return Builder.CreateNSWAdd(Ops.LHS, Ops.RHS, "add");
-      case LangOptions::SOB_Defined:
-        return Builder.CreateAdd(Ops.LHS, Ops.RHS, "add");
-      case LangOptions::SOB_Trapping:
-        return EmitOverflowCheckedBinOp(Ops);
-      }
+/// Emit pointer + index arithmetic.
+static Value *emitPointerArithmetic(CodeGenFunction &CGF,
+                                    const BinOpInfo &op,
+                                    bool isSubtraction) {
+  // Must have binary (not unary) expr here.  Unary pointer
+  // increment/decrement doesn't use this path.
+  const BinaryOperator *expr = cast<BinaryOperator>(op.E);
+  
+  Value *pointer = op.LHS;
+  Expr *pointerOperand = expr->getLHS();
+  Value *index = op.RHS;
+  Expr *indexOperand = expr->getRHS();
+
+  // In a subtraction, the LHS is always the pointer.
+  if (!isSubtraction && !pointer->getType()->isPointerTy()) {
+    std::swap(pointer, index);
+    std::swap(pointerOperand, indexOperand);
+  }
+
+  unsigned width = cast<llvm::IntegerType>(index->getType())->getBitWidth();
+  if (width != CGF.PointerWidthInBits) {
+    // Zero-extend or sign-extend the pointer value according to
+    // whether the index is signed or not.
+    bool isSigned = indexOperand->getType()->isSignedIntegerOrEnumerationType();
+    index = CGF.Builder.CreateIntCast(index, CGF.PtrDiffTy, isSigned,
+                                      "idx.ext");
+  }
+
+  // If this is subtraction, negate the index.
+  if (isSubtraction)
+    index = CGF.Builder.CreateNeg(index, "idx.neg");
+
+  const PointerType *pointerType
+    = pointerOperand->getType()->getAs<PointerType>();
+  if (!pointerType) {
+    QualType objectType = pointerOperand->getType()
+                                        ->castAs<ObjCObjectPointerType>()
+                                        ->getPointeeType();
+    llvm::Value *objectSize
+      = CGF.CGM.getSize(CGF.getContext().getTypeSizeInChars(objectType));
+
+    index = CGF.Builder.CreateMul(index, objectSize);
+
+    Value *result = CGF.Builder.CreateBitCast(pointer, CGF.VoidPtrTy);
+    result = CGF.Builder.CreateGEP(result, index, "add.ptr");
+    return CGF.Builder.CreateBitCast(result, pointer->getType());
+  }
+
+  QualType elementType = pointerType->getPointeeType();
+  if (const VariableArrayType *vla
+        = CGF.getContext().getAsVariableArrayType(elementType)) {
+    // The element count here is the total number of non-VLA elements.
+    llvm::Value *numElements = CGF.getVLASize(vla).first;
+
+    // Effectively, the multiply by the VLA size is part of the GEP.
+    // GEP indexes are signed, and scaling an index isn't permitted to
+    // signed-overflow, so we use the same semantics for our explicit
+    // multiply.  We suppress this if overflow is not undefined behavior.
+    if (CGF.getLangOptions().isSignedOverflowDefined()) {
+      index = CGF.Builder.CreateMul(index, numElements, "vla.index");
+      pointer = CGF.Builder.CreateGEP(pointer, index, "add.ptr");
+    } else {
+      index = CGF.Builder.CreateNSWMul(index, numElements, "vla.index");
+      pointer = CGF.Builder.CreateInBoundsGEP(pointer, index, "add.ptr");
     }
-    
-    if (Ops.LHS->getType()->isFPOrFPVectorTy())
-      return Builder.CreateFAdd(Ops.LHS, Ops.RHS, "add");
-
-    return Builder.CreateAdd(Ops.LHS, Ops.RHS, "add");
-  }
-
-  // Must have binary (not unary) expr here.  Unary pointer decrement doesn't
-  // use this path.
-  const BinaryOperator *BinOp = cast<BinaryOperator>(Ops.E);
-  
-  if (Ops.Ty->isPointerType() &&
-      Ops.Ty->getAs<PointerType>()->isVariableArrayType()) {
-    // The amount of the addition needs to account for the VLA size
-    CGF.ErrorUnsupported(BinOp, "VLA pointer addition");
-  }
-  
-  Value *Ptr, *Idx;
-  Expr *IdxExp;
-  const PointerType *PT = BinOp->getLHS()->getType()->getAs<PointerType>();
-  const ObjCObjectPointerType *OPT =
-    BinOp->getLHS()->getType()->getAs<ObjCObjectPointerType>();
-  if (PT || OPT) {
-    Ptr = Ops.LHS;
-    Idx = Ops.RHS;
-    IdxExp = BinOp->getRHS();
-  } else {  // int + pointer
-    PT = BinOp->getRHS()->getType()->getAs<PointerType>();
-    OPT = BinOp->getRHS()->getType()->getAs<ObjCObjectPointerType>();
-    assert((PT || OPT) && "Invalid add expr");
-    Ptr = Ops.RHS;
-    Idx = Ops.LHS;
-    IdxExp = BinOp->getLHS();
-  }
-
-  unsigned Width = cast<llvm::IntegerType>(Idx->getType())->getBitWidth();
-  if (Width < CGF.PointerWidthInBits) {
-    // Zero or sign extend the pointer value based on whether the index is
-    // signed or not.
-    const llvm::Type *IdxType = CGF.IntPtrTy;
-    if (IdxExp->getType()->isSignedIntegerOrEnumerationType())
-      Idx = Builder.CreateSExt(Idx, IdxType, "idx.ext");
-    else
-      Idx = Builder.CreateZExt(Idx, IdxType, "idx.ext");
-  }
-  const QualType ElementType = PT ? PT->getPointeeType() : OPT->getPointeeType();
-  // Handle interface types, which are not represented with a concrete type.
-  if (const ObjCObjectType *OIT = ElementType->getAs<ObjCObjectType>()) {
-    llvm::Value *InterfaceSize =
-      llvm::ConstantInt::get(Idx->getType(),
-          CGF.getContext().getTypeSizeInChars(OIT).getQuantity());
-    Idx = Builder.CreateMul(Idx, InterfaceSize);
-    const llvm::Type *i8Ty = llvm::Type::getInt8PtrTy(VMContext);
-    Value *Casted = Builder.CreateBitCast(Ptr, i8Ty);
-    Value *Res = Builder.CreateGEP(Casted, Idx, "add.ptr");
-    return Builder.CreateBitCast(Res, Ptr->getType());
+    return pointer;
   }
 
   // Explicitly handle GNU void* and function pointer arithmetic extensions. The
   // GNU void* casts amount to no-ops since our void* type is i8*, but this is
   // future proof.
-  if (ElementType->isVoidType() || ElementType->isFunctionType()) {
-    const llvm::Type *i8Ty = llvm::Type::getInt8PtrTy(VMContext);
-    Value *Casted = Builder.CreateBitCast(Ptr, i8Ty);
-    Value *Res = Builder.CreateGEP(Casted, Idx, "add.ptr");
-    return Builder.CreateBitCast(Res, Ptr->getType());
+  if (elementType->isVoidType() || elementType->isFunctionType()) {
+    Value *result = CGF.Builder.CreateBitCast(pointer, CGF.VoidPtrTy);
+    result = CGF.Builder.CreateGEP(result, index, "add.ptr");
+    return CGF.Builder.CreateBitCast(result, pointer->getType());
   }
 
-  if (CGF.getContext().getLangOptions().isSignedOverflowDefined())
-    return Builder.CreateGEP(Ptr, Idx, "add.ptr");
-  return Builder.CreateInBoundsGEP(Ptr, Idx, "add.ptr");
+  if (CGF.getLangOptions().isSignedOverflowDefined())
+    return CGF.Builder.CreateGEP(pointer, index, "add.ptr");
+
+  return CGF.Builder.CreateInBoundsGEP(pointer, index, "add.ptr");
 }
 
-Value *ScalarExprEmitter::EmitSub(const BinOpInfo &Ops) {
-  if (!isa<llvm::PointerType>(Ops.LHS->getType())) {
-    if (Ops.Ty->isSignedIntegerOrEnumerationType()) {
+Value *ScalarExprEmitter::EmitAdd(const BinOpInfo &op) {
+  if (op.LHS->getType()->isPointerTy() ||
+      op.RHS->getType()->isPointerTy())
+    return emitPointerArithmetic(CGF, op, /*subtraction*/ false);
+
+  if (op.Ty->isSignedIntegerOrEnumerationType()) {
+    switch (CGF.getContext().getLangOptions().getSignedOverflowBehavior()) {
+    case LangOptions::SOB_Undefined:
+      return Builder.CreateNSWAdd(op.LHS, op.RHS, "add");
+    case LangOptions::SOB_Defined:
+      return Builder.CreateAdd(op.LHS, op.RHS, "add");
+    case LangOptions::SOB_Trapping:
+      return EmitOverflowCheckedBinOp(op);
+    }
+  }
+    
+  if (op.LHS->getType()->isFPOrFPVectorTy())
+    return Builder.CreateFAdd(op.LHS, op.RHS, "add");
+
+  return Builder.CreateAdd(op.LHS, op.RHS, "add");
+}
+
+Value *ScalarExprEmitter::EmitSub(const BinOpInfo &op) {
+  // The LHS is always a pointer if either side is.
+  if (!op.LHS->getType()->isPointerTy()) {
+    if (op.Ty->isSignedIntegerOrEnumerationType()) {
       switch (CGF.getContext().getLangOptions().getSignedOverflowBehavior()) {
       case LangOptions::SOB_Undefined:
-        return Builder.CreateNSWSub(Ops.LHS, Ops.RHS, "sub");
+        return Builder.CreateNSWSub(op.LHS, op.RHS, "sub");
       case LangOptions::SOB_Defined:
-        return Builder.CreateSub(Ops.LHS, Ops.RHS, "sub");
+        return Builder.CreateSub(op.LHS, op.RHS, "sub");
       case LangOptions::SOB_Trapping:
-        return EmitOverflowCheckedBinOp(Ops);
+        return EmitOverflowCheckedBinOp(op);
       }
     }
     
-    if (Ops.LHS->getType()->isFPOrFPVectorTy())
-      return Builder.CreateFSub(Ops.LHS, Ops.RHS, "sub");
+    if (op.LHS->getType()->isFPOrFPVectorTy())
+      return Builder.CreateFSub(op.LHS, op.RHS, "sub");
 
-    return Builder.CreateSub(Ops.LHS, Ops.RHS, "sub");
+    return Builder.CreateSub(op.LHS, op.RHS, "sub");
   }
 
-  // Must have binary (not unary) expr here.  Unary pointer increment doesn't
-  // use this path.
-  const BinaryOperator *BinOp = cast<BinaryOperator>(Ops.E);
-  
-  if (BinOp->getLHS()->getType()->isPointerType() &&
-      BinOp->getLHS()->getType()->getAs<PointerType>()->isVariableArrayType()) {
-    // The amount of the addition needs to account for the VLA size for
-    // ptr-int
-    // The amount of the division needs to account for the VLA size for
-    // ptr-ptr.
-    CGF.ErrorUnsupported(BinOp, "VLA pointer subtraction");
-  }
+  // If the RHS is not a pointer, then we have normal pointer
+  // arithmetic.
+  if (!op.RHS->getType()->isPointerTy())
+    return emitPointerArithmetic(CGF, op, /*subtraction*/ true);
 
-  const QualType LHSType = BinOp->getLHS()->getType();
-  const QualType LHSElementType = LHSType->getPointeeType();
-  if (!isa<llvm::PointerType>(Ops.RHS->getType())) {
-    // pointer - int
-    Value *Idx = Ops.RHS;
-    unsigned Width = cast<llvm::IntegerType>(Idx->getType())->getBitWidth();
-    if (Width < CGF.PointerWidthInBits) {
-      // Zero or sign extend the pointer value based on whether the index is
-      // signed or not.
-      const llvm::Type *IdxType = CGF.IntPtrTy;
-      if (BinOp->getRHS()->getType()->isSignedIntegerOrEnumerationType())
-        Idx = Builder.CreateSExt(Idx, IdxType, "idx.ext");
-      else
-        Idx = Builder.CreateZExt(Idx, IdxType, "idx.ext");
-    }
-    Idx = Builder.CreateNeg(Idx, "sub.ptr.neg");
+  // Otherwise, this is a pointer subtraction.
 
-    // Handle interface types, which are not represented with a concrete type.
-    if (const ObjCObjectType *OIT = LHSElementType->getAs<ObjCObjectType>()) {
-      llvm::Value *InterfaceSize =
-        llvm::ConstantInt::get(Idx->getType(),
-                               CGF.getContext().
-                                 getTypeSizeInChars(OIT).getQuantity());
-      Idx = Builder.CreateMul(Idx, InterfaceSize);
-      const llvm::Type *i8Ty = llvm::Type::getInt8PtrTy(VMContext);
-      Value *LHSCasted = Builder.CreateBitCast(Ops.LHS, i8Ty);
-      Value *Res = Builder.CreateGEP(LHSCasted, Idx, "add.ptr");
-      return Builder.CreateBitCast(Res, Ops.LHS->getType());
-    }
+  // Do the raw subtraction part.
+  llvm::Value *LHS
+    = Builder.CreatePtrToInt(op.LHS, CGF.PtrDiffTy, "sub.ptr.lhs.cast");
+  llvm::Value *RHS
+    = Builder.CreatePtrToInt(op.RHS, CGF.PtrDiffTy, "sub.ptr.rhs.cast");
+  Value *diffInChars = Builder.CreateSub(LHS, RHS, "sub.ptr.sub");
 
-    // Explicitly handle GNU void* and function pointer arithmetic
-    // extensions. The GNU void* casts amount to no-ops since our void* type is
-    // i8*, but this is future proof.
-    if (LHSElementType->isVoidType() || LHSElementType->isFunctionType()) {
-      const llvm::Type *i8Ty = llvm::Type::getInt8PtrTy(VMContext);
-      Value *LHSCasted = Builder.CreateBitCast(Ops.LHS, i8Ty);
-      Value *Res = Builder.CreateGEP(LHSCasted, Idx, "sub.ptr");
-      return Builder.CreateBitCast(Res, Ops.LHS->getType());
-    }
+  // Okay, figure out the element size.
+  const BinaryOperator *expr = cast<BinaryOperator>(op.E);
+  QualType elementType = expr->getLHS()->getType()->getPointeeType();
 
-    if (CGF.getContext().getLangOptions().isSignedOverflowDefined())
-      return Builder.CreateGEP(Ops.LHS, Idx, "sub.ptr");
-    return Builder.CreateInBoundsGEP(Ops.LHS, Idx, "sub.ptr");
+  llvm::Value *divisor = 0;
+
+  // For a variable-length array, this is going to be non-constant.
+  if (const VariableArrayType *vla
+        = CGF.getContext().getAsVariableArrayType(elementType)) {
+    llvm::Value *numElements;
+    llvm::tie(numElements, elementType) = CGF.getVLASize(vla);
+
+    divisor = numElements;
+
+    // Scale the number of non-VLA elements by the non-VLA element size.
+    CharUnits eltSize = CGF.getContext().getTypeSizeInChars(elementType);
+    if (!eltSize.isOne())
+      divisor = CGF.Builder.CreateNUWMul(CGF.CGM.getSize(eltSize), divisor);
+
+  // For everything elese, we can just compute it, safe in the
+  // assumption that Sema won't let anything through that we can't
+  // safely compute the size of.
+  } else {
+    CharUnits elementSize;
+    // Handle GCC extension for pointer arithmetic on void* and
+    // function pointer types.
+    if (elementType->isVoidType() || elementType->isFunctionType())
+      elementSize = CharUnits::One();
+    else
+      elementSize = CGF.getContext().getTypeSizeInChars(elementType);
+
+    // Don't even emit the divide for element size of 1.
+    if (elementSize.isOne())
+      return diffInChars;
+
+    divisor = CGF.CGM.getSize(elementSize);
   }
   
-  // pointer - pointer
-  Value *LHS = Ops.LHS;
-  Value *RHS = Ops.RHS;
-
-  CharUnits ElementSize;
-
-  // Handle GCC extension for pointer arithmetic on void* and function pointer
-  // types.
-  if (LHSElementType->isVoidType() || LHSElementType->isFunctionType())
-    ElementSize = CharUnits::One();
-  else
-    ElementSize = CGF.getContext().getTypeSizeInChars(LHSElementType);
-
-  const llvm::Type *ResultType = ConvertType(Ops.Ty);
-  LHS = Builder.CreatePtrToInt(LHS, ResultType, "sub.ptr.lhs.cast");
-  RHS = Builder.CreatePtrToInt(RHS, ResultType, "sub.ptr.rhs.cast");
-  Value *BytesBetween = Builder.CreateSub(LHS, RHS, "sub.ptr.sub");
-
-  // Optimize out the shift for element size of 1.
-  if (ElementSize.isOne())
-    return BytesBetween;
-
   // Otherwise, do a full sdiv. This uses the "exact" form of sdiv, since
   // pointer difference in C is only defined in the case where both operands
   // are pointing to elements of an array.
-  Value *BytesPerElt = 
-      llvm::ConstantInt::get(ResultType, ElementSize.getQuantity());
-  return Builder.CreateExactSDiv(BytesBetween, BytesPerElt, "sub.ptr.div");
+  return Builder.CreateExactSDiv(diffInChars, divisor, "sub.ptr.div");
 }
 
 Value *ScalarExprEmitter::EmitShl(const BinOpInfo &Ops) {
@@ -2061,7 +2109,7 @@ enum IntrinsicType { VCMPEQ, VCMPGT };
 static llvm::Intrinsic::ID GetIntrinsic(IntrinsicType IT,
                                         BuiltinType::Kind ElemKind) {
   switch (ElemKind) {
-  default: assert(0 && "unexpected element type");
+  default: llvm_unreachable("unexpected element type");
   case BuiltinType::Char_U:
   case BuiltinType::UChar:
     return (IT == VCMPEQ) ? llvm::Intrinsic::ppc_altivec_vcmpequb_p :
@@ -2131,7 +2179,7 @@ Value *ScalarExprEmitter::EmitCompare(const BinaryOperator *E,unsigned UICmpOpc,
       BuiltinType::Kind ElementKind = BTy->getKind();
 
       switch(E->getOpcode()) {
-      default: assert(0 && "is not a comparison operation");
+      default: llvm_unreachable("is not a comparison operation");
       case BO_EQ:
         CR6 = CR6_LT;
         ID = GetIntrinsic(VCMPEQ, ElementKind);
@@ -2264,10 +2312,9 @@ Value *ScalarExprEmitter::VisitBinAssign(const BinaryOperator *E) {
     // 'An assignment expression has the value of the left operand after
     // the assignment...'.
     if (LHS.isBitField())
-      CGF.EmitStoreThroughBitfieldLValue(RValue::get(RHS), LHS, E->getType(),
-                                         &RHS);
+      CGF.EmitStoreThroughBitfieldLValue(RValue::get(RHS), LHS, &RHS);
     else
-      CGF.EmitStoreThroughLValue(RValue::get(RHS), LHS, E->getType());
+      CGF.EmitStoreThroughLValue(RValue::get(RHS), LHS);
   }
 
   // If the result is clearly ignored, return now.
@@ -2278,20 +2325,16 @@ Value *ScalarExprEmitter::VisitBinAssign(const BinaryOperator *E) {
   if (!CGF.getContext().getLangOptions().CPlusPlus)
     return RHS;
 
-  // Objective-C property assignment never reloads the value following a store.
-  if (LHS.isPropertyRef())
-    return RHS;
-
   // If the lvalue is non-volatile, return the computed value of the assignment.
   if (!LHS.isVolatileQualified())
     return RHS;
 
   // Otherwise, reload the value.
-  return EmitLoadOfLValue(LHS, E->getType());
+  return EmitLoadOfLValue(LHS);
 }
 
 Value *ScalarExprEmitter::VisitBinLAnd(const BinaryOperator *E) {
-  const llvm::Type *ResTy = ConvertType(E->getType());
+  llvm::Type *ResTy = ConvertType(E->getType());
   
   // If we have 0 && RHS, see if we can elide RHS, if so, just return 0.
   // If we have 1 && X, just emit X without inserting the control flow.
@@ -2346,7 +2389,7 @@ Value *ScalarExprEmitter::VisitBinLAnd(const BinaryOperator *E) {
 }
 
 Value *ScalarExprEmitter::VisitBinLOr(const BinaryOperator *E) {
-  const llvm::Type *ResTy = ConvertType(E->getType());
+  llvm::Type *ResTy = ConvertType(E->getType());
   
   // If we have 1 || RHS, see if we can elide RHS, if so, just return 1.
   // If we have 0 || X, just emit X without inserting the control flow.
@@ -2453,11 +2496,18 @@ VisitAbstractConditionalOperator(const AbstractConditionalOperator *E) {
     Expr *live = lhsExpr, *dead = rhsExpr;
     if (!CondExprBool) std::swap(live, dead);
 
-    // If the dead side doesn't have labels we need, and if the Live side isn't
-    // the gnu missing ?: extension (which we could handle, but don't bother
-    // to), just emit the Live part.
-    if (!CGF.ContainsLabel(dead))
-      return Visit(live);
+    // If the dead side doesn't have labels we need, just emit the Live part.
+    if (!CGF.ContainsLabel(dead)) {
+      Value *Result = Visit(live);
+
+      // If the live part is a throw expression, it acts like it has a void
+      // type, so evaluating it returns a null Value*.  However, a conditional
+      // with non-void type must return a non-null Value*.
+      if (!Result && !E->getType()->isVoidType())
+        Result = llvm::UndefValue::get(CGF.ConvertType(E->getType()));
+
+      return Result;
+    }
   }
 
   // OpenCL: If the condition is a vector, we can treat this condition like
@@ -2468,11 +2518,11 @@ VisitAbstractConditionalOperator(const AbstractConditionalOperator *E) {
     llvm::Value *LHS = Visit(lhsExpr);
     llvm::Value *RHS = Visit(rhsExpr);
     
-    const llvm::Type *condType = ConvertType(condExpr->getType());
-    const llvm::VectorType *vecTy = cast<llvm::VectorType>(condType);
+    llvm::Type *condType = ConvertType(condExpr->getType());
+    llvm::VectorType *vecTy = cast<llvm::VectorType>(condType);
     
     unsigned numElem = vecTy->getNumElements();      
-    const llvm::Type *elemType = vecTy->getElementType();
+    llvm::Type *elemType = vecTy->getElementType();
     
     std::vector<llvm::Constant*> Zvals;
     for (unsigned i = 0; i < numElem; ++i)
@@ -2490,7 +2540,7 @@ VisitAbstractConditionalOperator(const AbstractConditionalOperator *E) {
     llvm::Value *RHSTmp = RHS;
     llvm::Value *LHSTmp = LHS;
     bool wasCast = false;
-    const llvm::VectorType *rhsVTy = cast<llvm::VectorType>(RHS->getType());
+    llvm::VectorType *rhsVTy = cast<llvm::VectorType>(RHS->getType());
     if (rhsVTy->getElementType()->isFloatTy()) {
       RHSTmp = Builder.CreateBitCast(RHS, tmp2->getType());
       LHSTmp = Builder.CreateBitCast(LHS, tmp->getType());
@@ -2514,6 +2564,11 @@ VisitAbstractConditionalOperator(const AbstractConditionalOperator *E) {
     llvm::Value *CondV = CGF.EvaluateExprAsBool(condExpr);
     llvm::Value *LHS = Visit(lhsExpr);
     llvm::Value *RHS = Visit(rhsExpr);
+    if (!LHS) {
+      // If the conditional has void type, make sure we return a null Value*.
+      assert(!RHS && "LHS and RHS types must match");
+      return 0;
+    }
     return Builder.CreateSelect(CondV, LHS, RHS, "cond");
   }
 
@@ -2575,11 +2630,11 @@ Value *ScalarExprEmitter::VisitBlockExpr(const BlockExpr *block) {
 
 Value *ScalarExprEmitter::VisitAsTypeExpr(AsTypeExpr *E) {
   Value *Src  = CGF.EmitScalarExpr(E->getSrcExpr());
-  const llvm::Type * DstTy = ConvertType(E->getDstType());
+  llvm::Type *DstTy = ConvertType(E->getType());
   
   // Going from vec4->vec3 or vec3->vec4 is a special case and requires
   // a shuffle vector instead of a bitcast.
-  const llvm::Type *SrcTy = Src->getType();
+  llvm::Type *SrcTy = Src->getType();
   if (isa<llvm::VectorType>(DstTy) && isa<llvm::VectorType>(SrcTy)) {
     unsigned numElementsDst = cast<llvm::VectorType>(DstTy)->getNumElements();
     unsigned numElementsSrc = cast<llvm::VectorType>(SrcTy)->getNumElements();
@@ -2589,15 +2644,15 @@ Value *ScalarExprEmitter::VisitAsTypeExpr(AsTypeExpr *E) {
       
       // In the case of going from int4->float3, a bitcast is needed before
       // doing a shuffle.
-      const llvm::Type *srcElemTy = 
+      llvm::Type *srcElemTy = 
       cast<llvm::VectorType>(SrcTy)->getElementType();
-      const llvm::Type *dstElemTy = 
+      llvm::Type *dstElemTy = 
       cast<llvm::VectorType>(DstTy)->getElementType();
       
       if ((srcElemTy->isIntegerTy() && dstElemTy->isFloatTy())
           || (srcElemTy->isFloatTy() && dstElemTy->isIntegerTy())) {
         // Create a float type of the same size as the source or destination.
-        const llvm::VectorType *newSrcTy = llvm::VectorType::get(dstElemTy,
+        llvm::VectorType *newSrcTy = llvm::VectorType::get(dstElemTy,
                                                                  numElementsSrc);
         
         Src = Builder.CreateBitCast(Src, newSrcTy, "astypeCast");
@@ -2605,7 +2660,7 @@ Value *ScalarExprEmitter::VisitAsTypeExpr(AsTypeExpr *E) {
       
       llvm::Value *UnV = llvm::UndefValue::get(Src->getType());
       
-      llvm::SmallVector<llvm::Constant*, 3> Args;
+      SmallVector<llvm::Constant*, 3> Args;
       Args.push_back(Builder.getInt32(0));
       Args.push_back(Builder.getInt32(1));
       Args.push_back(Builder.getInt32(2));
@@ -2621,6 +2676,10 @@ Value *ScalarExprEmitter::VisitAsTypeExpr(AsTypeExpr *E) {
   }
   
   return Builder.CreateBitCast(Src, DstTy, "astype");
+}
+
+Value *ScalarExprEmitter::VisitAtomicExpr(AtomicExpr *E) {
+  return CGF.EmitAtomicExpr(E).getScalarVal();
 }
 
 //===----------------------------------------------------------------------===//
@@ -2675,15 +2734,15 @@ LValue CodeGenFunction::EmitObjCIsaExpr(const ObjCIsaExpr *E) {
   // object->isa or (*object).isa
   // Generate code as for: *(Class*)object
   // build Class* type
-  const llvm::Type *ClassPtrTy = ConvertType(E->getType());
+  llvm::Type *ClassPtrTy = ConvertType(E->getType());
 
   Expr *BaseExpr = E->getBase();
   if (BaseExpr->isRValue()) {
-    V = CreateTempAlloca(ClassPtrTy, "resval");
+    V = CreateMemTemp(E->getType(), "resval");
     llvm::Value *Src = EmitScalarExpr(BaseExpr);
     Builder.CreateStore(Src, V);
     V = ScalarExprEmitter(*this).EmitLoadOfLValue(
-      MakeAddrLValue(V, E->getType()), E->getType());
+      MakeNaturalAlignAddrLValue(V, E->getType()));
   } else {
     if (E->isArrow())
       V = ScalarExprEmitter(*this).EmitLoadOfLValue(BaseExpr);
@@ -2694,7 +2753,7 @@ LValue CodeGenFunction::EmitObjCIsaExpr(const ObjCIsaExpr *E) {
   // build Class* type
   ClassPtrTy = ClassPtrTy->getPointerTo();
   V = Builder.CreateBitCast(V, ClassPtrTy);
-  return MakeAddrLValue(V, E->getType());
+  return MakeNaturalAlignAddrLValue(V, E->getType());
 }
 
 
@@ -2741,8 +2800,7 @@ LValue CodeGenFunction::EmitCompoundAssignmentLValue(
   case BO_LOr:
   case BO_Assign:
   case BO_Comma:
-    assert(false && "Not valid compound assignment operators");
-    break;
+    llvm_unreachable("Not valid compound assignment operators");
   }
    
   llvm_unreachable("Unhandled compound assignment operator");

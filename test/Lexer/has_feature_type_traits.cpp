@@ -70,6 +70,11 @@ int is_enum();
 #endif
 // CHECK: int is_enum();
 
+#if __has_feature(is_final)
+int is_final();
+#endif
+// CHECK: int is_final();
+
 #if __has_feature(is_pod)
 int is_pod();
 #endif
@@ -99,3 +104,8 @@ int is_standard_layout();
 int is_trivially_copyable();
 #endif
 // CHECK: int is_trivially_copyable();
+
+#if __has_feature(underlying_type)
+int underlying_type();
+#endif
+// CHECK: int underlying_type();

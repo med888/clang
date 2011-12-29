@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -fcxx-exceptions -fexceptions -fsyntax-only -verify %s -std=c++0x
+// RUN: %clang_cc1 -fcxx-exceptions -fexceptions -fsyntax-only -verify %s -std=c++11
 
 struct S {
   virtual ~S();
@@ -46,7 +46,7 @@ void j() {
   U<auto> v; // expected-error{{'auto' not allowed in template argument}}
 
   int n;
-  (void)dynamic_cast<auto&>(S()); // expected-error{{'auto' not allowed here}}
+  (void)dynamic_cast<auto&>(n); // expected-error{{'auto' not allowed here}}
   (void)static_cast<auto*>(&n); // expected-error{{'auto' not allowed here}}
   (void)reinterpret_cast<auto*>(&n); // expected-error{{'auto' not allowed here}}
   (void)const_cast<auto>(n); // expected-error{{'auto' not allowed here}}

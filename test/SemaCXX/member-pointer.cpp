@@ -278,7 +278,7 @@ namespace PR9973 {
     typedef R T::*F;
     F f_;
     template<class U> int & call(U u)
-    { return u->*f_; } // expected-error{{non-const lvalue reference to type 'int' cannot bind to a temporary of type '<bound member function type>'}}
+    { return u->*f_; } // expected-error{{reference to non-static member function must be called; did you mean to call it with no arguments?}} expected-error {{non-const lvalue reference to type 'int' cannot bind to a temporary of type 'int'}}
 
     template<class U> int operator()(U u)
     { call(u); } // expected-note{{in instantiation of}}
@@ -294,5 +294,21 @@ namespace PR9973 {
   {
     test* t;
     mem_fn(&test::nullary_v)(t); // expected-note{{in instantiation of}}
+  }
+}
+
+namespace test8 {
+  struct A { int foo; };
+  int test1() {
+    // Verify that we perform (and check) an lvalue conversion on the operands here.
+    return (*((A**) 0)) // expected-warning {{indirection of non-volatile null pointer will be deleted}} expected-note {{consider}}
+             ->**(int A::**) 0; // expected-warning {{indirection of non-volatile null pointer will be deleted}} expected-note {{consider}}
+  }
+
+  int test2() {
+    // Verify that we perform (and check) an lvalue conversion on the operands here.
+    // TODO: the .* should itself warn about being a dereference of null.
+    return (*((A*) 0))
+             .**(int A::**) 0; // expected-warning {{indirection of non-volatile null pointer will be deleted}} expected-note {{consider}}
   }
 }

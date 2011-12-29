@@ -1,12 +1,12 @@
-// RUN: %clang_cc1 -triple x86_64-apple-darwin10 -fobjc-nonfragile-abi -fsyntax-only -fobjc-arc -x objective-c %s.result
-// RUN: arcmt-test --args -triple x86_64-apple-darwin10 -fobjc-nonfragile-abi -fsyntax-only -x objective-c %s > %t
+// RUN: %clang_cc1 -triple x86_64-apple-darwin10 -fsyntax-only -fobjc-arc -x objective-c %s.result
+// RUN: arcmt-test --args -triple x86_64-apple-darwin10 -fsyntax-only -x objective-c %s > %t
 // RUN: diff %t %s.result
 
 @interface Foo 
-@property (retain) id x;
-@property (retain) id y;
-@property (retain) id w;
-@property (retain) id z;
+@property  id x;
+@property  id y;
+@property  id w;
+@property  id z;
 @property (strong) id q;
 @end
 
@@ -23,7 +23,7 @@
 @end
 
 @interface Bar
-@property (retain) Foo *a;
+@property  Foo *a;
 - (void) setA:(Foo*) val;
 - (id) a;
 @end

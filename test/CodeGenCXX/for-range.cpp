@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -triple x86_64-apple-darwin10 -std=c++0x -emit-llvm -o - %s | opt -instnamer -S | FileCheck %s
+// RUN: %clang_cc1 -triple x86_64-apple-darwin10 -std=c++11 -emit-llvm -o - %s | opt -instnamer -S | FileCheck %s
 
 struct A {
   A();
@@ -69,8 +69,8 @@ void for_range() {
   A a;
   for (B b : C()) {
     // CHECK: call void @_ZN1CC1Ev(
-    // CHECK: = call %struct.A* @_ZSt5beginR1C(
-    // CHECK: = call %struct.A* @_ZSt3endR1C(
+    // CHECK: = call %struct.B* @_ZSt5beginR1C(
+    // CHECK: = call %struct.B* @_ZSt3endR1C(
     // CHECK: br label %[[COND:.*]]
 
     // CHECK: [[COND]]:
@@ -101,8 +101,8 @@ void for_member_range() {
   A a;
   for (B b : D()) {
     // CHECK: call void @_ZN1DC1Ev(
-    // CHECK: = call %struct.A* @_ZN1D5beginEv(
-    // CHECK: = call %struct.A* @_ZN1D3endEv(
+    // CHECK: = call %struct.B* @_ZN1D5beginEv(
+    // CHECK: = call %struct.B* @_ZN1D3endEv(
     // CHECK: br label %[[COND:.*]]
 
     // CHECK: [[COND]]:

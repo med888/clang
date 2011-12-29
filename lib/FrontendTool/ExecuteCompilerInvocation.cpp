@@ -39,8 +39,6 @@ static FrontendAction *CreateFrontendBaseAction(CompilerInstance &CI) {
   case ASTDumpXML:             return new ASTDumpXMLAction();
   case ASTPrint:               return new ASTPrintAction();
   case ASTView:                return new ASTViewAction();
-  case BoostCon:               return new BoostConAction();
-  case CreateModule:           return 0;
   case DumpRawTokens:          return new DumpRawTokensAction();
   case DumpTokens:             return new DumpTokensAction();
   case EmitAssembly:           return new EmitAssemblyAction();
@@ -51,7 +49,8 @@ static FrontendAction *CreateFrontendBaseAction(CompilerInstance &CI) {
   case EmitCodeGenOnly:        return new EmitCodeGenOnlyAction();
   case EmitObj:                return new EmitObjAction();
   case FixIt:                  return new FixItAction();
-  case GeneratePCH:            return new GeneratePCHAction();
+  case GenerateModule:         return new GenerateModuleAction;
+  case GeneratePCH:            return new GeneratePCHAction;
   case GeneratePTH:            return new GeneratePTHAction();
   case InitOnly:               return new InitOnlyAction();
   case ParseSyntaxOnly:        return new SyntaxOnlyAction();
@@ -98,7 +97,13 @@ static FrontendAction *CreateFrontendAction(CompilerInstance &CI) {
     Act = new arcmt::CheckAction(Act);
     break;
   case FrontendOptions::ARCMT_Modify:
-    Act = new arcmt::TransformationAction(Act);
+    Act = new arcmt::ModifyAction(Act);
+    break;
+  case FrontendOptions::ARCMT_Migrate:
+    Act = new arcmt::MigrateAction(Act,
+                                   CI.getFrontendOpts().ARCMTMigrateDir,
+                                   CI.getFrontendOpts().ARCMTMigrateReportOut,
+                                CI.getFrontendOpts().ARCMTMigrateEmitARCErrors);
     break;
   }
 
@@ -120,31 +125,12 @@ bool clang::ExecuteCompilerInvocation(CompilerInstance *Clang) {
     return 0;
   }
 
-  // Honor -analyzer-checker-help.
-  if (Clang->getAnalyzerOpts().ShowCheckerHelp) {
-    ento::printCheckerHelp(llvm::outs());
-    return 0;
-  }
-
   // Honor -version.
   //
   // FIXME: Use a better -version message?
   if (Clang->getFrontendOpts().ShowVersion) {
     llvm::cl::PrintVersionMessage();
     return 0;
-  }
-
-  // Honor -mllvm.
-  //
-  // FIXME: Remove this, one day.
-  if (!Clang->getFrontendOpts().LLVMArgs.empty()) {
-    unsigned NumArgs = Clang->getFrontendOpts().LLVMArgs.size();
-    const char **Args = new const char*[NumArgs + 2];
-    Args[0] = "clang (LLVM option parsing)";
-    for (unsigned i = 0; i != NumArgs; ++i)
-      Args[i + 1] = Clang->getFrontendOpts().LLVMArgs[i].c_str();
-    Args[NumArgs + 1] = 0;
-    llvm::cl::ParseCommandLineOptions(NumArgs + 1, const_cast<char **>(Args));
   }
 
   // Load any requested plugins.
@@ -155,6 +141,27 @@ bool clang::ExecuteCompilerInvocation(CompilerInstance *Clang) {
     if (llvm::sys::DynamicLibrary::LoadLibraryPermanently(Path.c_str(), &Error))
       Clang->getDiagnostics().Report(diag::err_fe_unable_to_load_plugin)
         << Path << Error;
+  }
+
+  // Honor -mllvm.
+  //
+  // FIXME: Remove this, one day.
+  // This should happen AFTER plugins have been loaded!
+  if (!Clang->getFrontendOpts().LLVMArgs.empty()) {
+    unsigned NumArgs = Clang->getFrontendOpts().LLVMArgs.size();
+    const char **Args = new const char*[NumArgs + 2];
+    Args[0] = "clang (LLVM option parsing)";
+    for (unsigned i = 0; i != NumArgs; ++i)
+      Args[i + 1] = Clang->getFrontendOpts().LLVMArgs[i].c_str();
+    Args[NumArgs + 1] = 0;
+    llvm::cl::ParseCommandLineOptions(NumArgs + 1, const_cast<char **>(Args));
+  }
+
+  // Honor -analyzer-checker-help.
+  // This should happen AFTER plugins have been loaded!
+  if (Clang->getAnalyzerOpts().ShowCheckerHelp) {
+    ento::printCheckerHelp(llvm::outs(), Clang->getFrontendOpts().Plugins);
+    return 0;
   }
 
   // If there were errors in processing arguments, don't do anything else.

@@ -24,8 +24,6 @@ namespace frontend {
     ASTDumpXML,             ///< Parse ASTs and dump them in XML.
     ASTPrint,               ///< Parse ASTs and print them.
     ASTView,                ///< Parse ASTs and view them in Graphviz.
-    BoostCon,               ///< BoostCon mode.
-    CreateModule,           ///< Create module definition
     DumpRawTokens,          ///< Dump out raw tokens.
     DumpTokens,             ///< Dump out preprocessed tokens.
     EmitAssembly,           ///< Emit a .s file.
@@ -36,6 +34,7 @@ namespace frontend {
     EmitCodeGenOnly,        ///< Generate machine code, but don't emit anything.
     EmitObj,                ///< Emit a .o file.
     FixIt,                  ///< Parse and apply any fixits to the source.
+    GenerateModule,         ///< Generate pre-compiled module.
     GeneratePCH,            ///< Generate pre-compiled header.
     GeneratePTH,            ///< Generate pre-tokenized header.
     InitOnly,               ///< Only execute frontend initialization.
@@ -59,9 +58,6 @@ public:
   unsigned RelocatablePCH : 1;             ///< When generating PCH files,
                                            /// instruct the AST writer to create
                                            /// relocatable PCH files.
-  unsigned ChainedPCH : 1;                 ///< When generating PCH files,
-                                           /// instruct the AST writer to create
-                                           /// chained PCH files.
   unsigned ShowHelp : 1;                   ///< Show the -help text.
   unsigned ShowMacrosInCodeCompletion : 1; ///< Show macros in code completion
                                            /// results.
@@ -76,12 +72,18 @@ public:
   unsigned ShowVersion : 1;                ///< Show the -version text.
   unsigned FixWhatYouCan : 1;              ///< Apply fixes even if there are
                                            /// unfixable errors.
+  unsigned ARCMTMigrateEmitARCErrors : 1;  /// Emit ARC errors even if the
+                                           /// migrator can fix them
 
   enum {
     ARCMT_None,
     ARCMT_Check,
-    ARCMT_Modify
+    ARCMT_Modify,
+    ARCMT_Migrate
   } ARCMTAction;
+
+  std::string ARCMTMigrateDir;
+  std::string ARCMTMigrateReportOut;
 
   /// The input files and their types.
   std::vector<std::pair<InputKind, std::string> > Inputs;
@@ -116,9 +118,6 @@ public:
   /// \brief The list of AST files to merge.
   std::vector<std::string> ASTMergeFiles;
 
-  /// \brief The list of modules to import.
-  std::vector<std::string> Modules;
-
   /// \brief A list of arguments to forward to LLVM's option processing; this
   /// should only be used for debugging and experimental features.
   std::vector<std::string> LLVMArgs;
@@ -129,7 +128,6 @@ public:
     ProgramAction = frontend::ParseSyntaxOnly;
     ActionName = "";
     RelocatablePCH = 0;
-    ChainedPCH = 0;
     ShowHelp = 0;
     ShowMacrosInCodeCompletion = 0;
     ShowCodePatternsInCodeCompletion = 0;
@@ -138,6 +136,7 @@ public:
     ShowTimers = 0;
     ShowVersion = 0;
     ARCMTAction = ARCMT_None;
+    ARCMTMigrateEmitARCErrors = 0;
   }
 
   /// getInputKindForExtension - Return the appropriate input kind for a file
@@ -145,7 +144,7 @@ public:
   ///
   /// \return The input kind for the extension, or IK_None if the extension is
   /// not recognized.
-  static InputKind getInputKindForExtension(llvm::StringRef Extension);
+  static InputKind getInputKindForExtension(StringRef Extension);
 };
 
 }  // end namespace clang

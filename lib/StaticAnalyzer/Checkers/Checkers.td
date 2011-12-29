@@ -10,41 +10,33 @@
 include "clang/StaticAnalyzer/Checkers/CheckerBase.td"
 
 //===----------------------------------------------------------------------===//
-// Groups.
-//===----------------------------------------------------------------------===//
-
-def AllExperimental : CheckerGroup<"all-experimental">;
-
-//===----------------------------------------------------------------------===//
 // Packages.
 //===----------------------------------------------------------------------===//
+
+def Experimental : Package<"experimental">;
 
 def Core : Package<"core">;
 def CoreBuiltin : Package<"builtin">, InPackage<Core>;
 def CoreUninitialized  : Package<"uninitialized">, InPackage<Core>;
-def CoreExperimental : Package<"experimental">, InPackage<Core>,
-  InGroup<AllExperimental>, Hidden;
+def CoreExperimental : Package<"core">, InPackage<Experimental>, Hidden;
 
 def Cplusplus : Package<"cplusplus">;
-def CplusplusExperimental : Package<"experimental">, InPackage<Cplusplus>,
-  InGroup<AllExperimental>, Hidden;
+def CplusplusExperimental : Package<"cplusplus">, InPackage<Experimental>, Hidden;
 
 def DeadCode : Package<"deadcode">;
-def DeadCodeExperimental : Package<"experimental">, InPackage<DeadCode>,
-  InGroup<AllExperimental>, Hidden;
+def DeadCodeExperimental : Package<"deadcode">, InPackage<Experimental>, Hidden;
 
 def Security : Package <"security">;
-def SecurityExperimental : Package<"experimental">, InPackage<Security>,
-  InGroup<AllExperimental>, Hidden;
+def SecurityExperimental : Package<"security">, InPackage<Experimental>, Hidden;
+def Taint : Package<"taint">, InPackage<SecurityExperimental>, Hidden;  
 
 def Unix : Package<"unix">;
-def UnixExperimental : Package<"experimental">, InPackage<Unix>,
-  InGroup<AllExperimental>, Hidden;
+def UnixExperimental : Package<"unix">, InPackage<Experimental>, Hidden;
 
 def OSX : Package<"osx">;
+def OSXExperimental : Package<"osx">, InPackage<Experimental>, Hidden;
 def Cocoa : Package<"cocoa">, InPackage<OSX>;
-def CocoaExperimental : Package<"experimental">, InPackage<Cocoa>,
-  InGroup<AllExperimental>, Hidden;
+def CocoaExperimental : Package<"cocoa">, InPackage<OSXExperimental>, Hidden;
 def CoreFoundation : Package<"coreFoundation">, InPackage<OSX>;
 
 def LLVM : Package<"llvm">;
@@ -220,7 +212,23 @@ def ReturnPointerRangeChecker : Checker<"ReturnPtrRange">,
   HelpText<"Check for an out-of-bound pointer being returned to callers">,
   DescFile<"ReturnPointerRangeChecker.cpp">;
 
+def MallocOverflowSecurityChecker : Checker<"MallocOverflow">,
+  HelpText<"Check for overflows in the arguments to malloc()">,
+  DescFile<"MallocOverflowSecurityChecker.cpp">;
+
 } // end "security.experimental"
+
+//===----------------------------------------------------------------------===//
+// Taint checkers.
+//===----------------------------------------------------------------------===//
+
+let ParentPackage = Taint in {
+
+def GenericTaintChecker : Checker<"TaintPropagation">,
+  HelpText<"Generate taint information used by other checkers">,
+  DescFile<"GenericTaintChecker.cpp">;
+
+} // end "experimental.security.taint"
 
 //===----------------------------------------------------------------------===//
 // Unix API checkers.
@@ -248,6 +256,10 @@ def MallocChecker : Checker<"Malloc">,
   HelpText<"Check for potential memory leaks, double free, and use-after-free problems">,
   DescFile<"MallocChecker.cpp">;
 
+def MallocSizeofChecker : Checker<"MallocSizeof">,
+  HelpText<"Check for dubious malloc arguments involving sizeof">,
+  DescFile<"MallocSizeofChecker.cpp">;
+
 def PthreadLockChecker : Checker<"PthreadLock">,
   HelpText<"Simple lock -> unlock checker">,
   DescFile<"PthreadLockChecker.cpp">;
@@ -274,6 +286,11 @@ def OSAtomicChecker : Checker<"AtomicCAS">,
   HelpText<"Evaluate calls to OSAtomic functions">,
   DescFile<"OSAtomicChecker.cpp">;
 
+def MacOSKeychainAPIChecker : Checker<"SecKeychainAPI">,
+  InPackage<OSX>,
+  HelpText<"Check for proper uses of Secure Keychain APIs">,
+  DescFile<"MacOSKeychainAPIChecker.cpp">;
+
 } // end "macosx"
 
 let ParentPackage = Cocoa in {
@@ -291,7 +308,7 @@ def ClassReleaseChecker : Checker<"ClassRelease">,
   DescFile<"BasicObjCFoundationChecks.cpp">;
 
 def VariadicMethodTypeChecker : Checker<"VariadicMethodTypes">,
-  HelpText<"Check for passing non-Objective-C types to variadic methods that expect"
+  HelpText<"Check for passing non-Objective-C types to variadic methods that expect "
            "only Objective-C types">,
   DescFile<"BasicObjCFoundationChecks.cpp">;
 
@@ -310,6 +327,10 @@ def ObjCUnusedIvarsChecker : Checker<"UnusedIvars">,
 def NSErrorChecker : Checker<"NSError">,
   HelpText<"Check usage of NSError** parameters">,
   DescFile<"NSErrorChecker.cpp">;
+
+def RetainCountChecker : Checker<"RetainCount">,
+  HelpText<"Check for leaks and improper reference count management">,
+  DescFile<"RetainCountChecker.cpp">;
 
 } // end "cocoa"
 
@@ -355,6 +376,10 @@ def LLVMConventionsChecker : Checker<"Conventions">,
 
 let ParentPackage = Debug in {
 
+def DominatorsTreeDumper : Checker<"DumpDominators">,
+  HelpText<"Print the dominance tree for a given CFG">,
+  DescFile<"DebugCheckers.cpp">;
+
 def LiveVariablesDumper : Checker<"DumpLiveVars">,
   HelpText<"Print results of live variable analysis">,
   DescFile<"DebugCheckers.cpp">;
@@ -370,6 +395,10 @@ def CFGDumper : Checker<"DumpCFG">,
 def AnalyzerStatsChecker : Checker<"Stats">,
   HelpText<"Emit warnings with analyzer statistics">,
   DescFile<"AnalyzerStatsChecker.cpp">;
+
+def TaintTesterChecker : Checker<"TaintTest">,
+  HelpText<"Mark tainted symbols as such.">,
+  DescFile<"TaintTesterChecker.cpp">;
 
 } // end "debug"
 
